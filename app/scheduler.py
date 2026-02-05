@@ -129,58 +129,40 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # ---- TEST MODE: fire 7:00/7:15/7:30/21:00 in next minutes ----
             if test_mode:
-                if u.telegram_chat_id not in TEST_TRIGGERS:
-                    TEST_TRIGGERS[u.telegram_chat_id] = {
-                        "07:00": now_local + timedelta(minutes=1),
-                        "07:15": now_local + timedelta(minutes=2),
-                        "07:30": now_local + timedelta(minutes=3),
-                        "21:00": now_local + timedelta(minutes=4),
-                        "_fired": set(),
-                    }
-                triggers = TEST_TRIGGERS[u.telegram_chat_id]
+                triggers = TEST_TRIGGERS.setdefault(u.telegram_chat_id, {
+                    "07:00": now_local + timedelta(minutes=1),
+                    "07:15": now_local + timedelta(minutes=2),
+                    "07:30": now_local + timedelta(minutes=3),
+                    "21:00": now_local + timedelta(minutes=4),
+                    "_fired": set(),
+                })
                 fired = triggers["_fired"]
 
                 def should_fire(label: str) -> bool:
                     t = triggers[label]
-                    return label not in fired and _same_minute(now_local, t)
+                    return (
+                        label not in fired
+                        and now_local.strftime("%Y-%m-%d %H:%M") == t.strftime("%Y-%m-%d %H:%M")
+                    )
 
                 if should_fire("07:00"):
                     fired.add("07:00")
-                    people = db.query(Person).filter(Person.user_id == u.id).all()
-                    people_msg = format_people(people, u.timezone)
-
-                    try:
-                        tasks = todoist_list_tasks(project_id=default_project_id())
-                        todos_msg = format_todoist_tasks_numbered(tasks)
-                    except TodoistError as e:
-                        todos_msg = f"(Todoist error: {e})"
-
-                    msg = (
-                        "Morning! Please set up today’s calendar.\n\n"
-                        "Todos:\n" + todos_msg + "\n\n"
-                        "People:\n" + people_msg
-                    )
-                    await _send(app, u.telegram_chat_id, msg)
+                    await _send(app, u.telegram_chat_id, "TEST 07:00 ...")
 
                 if should_fire("07:15"):
                     fired.add("07:15")
-                    _build_daily_event_index(u)
-                    day = today_in_tz(u.timezone)
-                    events = db.query(DailyEventIndex).filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day).all()
-                    await _send(app, u.telegram_chat_id, "TEST 07:15\nToday’s events:\n" + format_events(events, u.timezone))
+                    await _send(app, u.telegram_chat_id, "TEST 07:15 ...")
 
                 if should_fire("07:30"):
                     fired.add("07:30")
-                    await _send(app, u.telegram_chat_id, "TEST 07:30\nRunning time. Shoes on. Reply when you’re back.")
+                    await _send(app, u.telegram_chat_id, "TEST 07:30 ...")
 
                 if should_fire("21:00"):
                     fired.add("21:00")
-                    await _send(app, u.telegram_chat_id, "TEST 21:00\nWind-down: 2 min brain dump + pick tomorrow’s 1 priority.")
+                    await _send(app, u.telegram_chat_id, "TEST 21:00 ...")
 
-                # still run meal + event checkins during test mode (optional)
-                await _maybe_fire_meal_checkin(app, db, u, now_local)
-                await _maybe_fire_event_checkins(app, db, u, now_local)
-                continue
+                continue  # <-- IMPORTANT: do not run normal mode below
+
 
             # ---- NORMAL MODE ----
 

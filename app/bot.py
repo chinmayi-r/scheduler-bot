@@ -1,4 +1,6 @@
 from __future__ import annotations
+import os
+import sys
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -64,6 +66,16 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
+    if os.environ.get("BOT_INSTANCE_LOCK", "1") == "1":
+        lock_path = "/tmp/tg_bot.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+        except FileExistsError:
+            print("Bot already running (lock exists). Exiting.")
+            sys.exit(0)
+            
     init_db()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
