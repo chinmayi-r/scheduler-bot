@@ -8,27 +8,14 @@ import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-from .config import TELEGRAM_BOT_TOKEN
+from .config import TELEGRAM_BOT_TOKEN, STORE_PHOTO_FILE_ID, ALLOWED_MISSES_PER_DAY, BOT_INSTANCE_LOCK
 from .db import init_db, SessionLocal, User, Checkin, DailyEventIndex
 from .commands import handle_text_command, help_text
 from .services.timeutil import today_in_tz
 from .scheduler import start_scheduler
 
 
-# -----------------------------
-# Settings
-# -----------------------------
-
-# If "1": store file_id pointers; if "0": store caption only
-STORE_PHOTO_FILE_ID = os.environ.get("STORE_PHOTO_FILE_ID", "0") == "1"
-
-# Allowed misses per day for "honored"
-ALLOWED_MISSES_PER_DAY = int(os.environ.get("ALLOWED_MISSES_PER_DAY", "1"))
-
-
-# -----------------------------
 # Helpers
-# -----------------------------
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
@@ -196,9 +183,7 @@ def compute_streak(db, user: User, end_day: date) -> tuple[int, int]:
     return cur, best
 
 
-# -----------------------------
 # Handlers
-# -----------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
@@ -337,7 +322,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     # Prevent multiple pollers in same container
-    if os.environ.get("BOT_INSTANCE_LOCK", "1") == "1":
+    if BOT_INSTANCE_LOCK == "1":
         lock_path = "/tmp/tg_bot.lock"
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

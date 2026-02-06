@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 
 import json
-import os
+
+from ..config import GCAL_ICS_URLS_JSON
 
 import pytz
 import requests
@@ -23,7 +24,7 @@ class CalEvent:
 
 
 def _load_ics_urls() -> Dict[str, str]:
-    raw = os.environ.get("GCAL_ICS_URLS_JSON", "").strip()
+    raw = GCAL_ICS_URLS_JSON
     if not raw:
         raise RuntimeError("GCAL_ICS_URLS_JSON is not set")
     try:

@@ -9,8 +9,10 @@ import pytz
 from telegram.ext import ContextTypes
 
 from .db import SessionLocal, User, Person, DailyEventIndex, Checkin
+from .config import MEAL_TIMES_JSON, TEST_SCHEDULE, ALLOWED_MISSES_PER_DAY 
 from .services.formatters import format_events, format_people, format_todoist_tasks_numbered
 from .services.todoist import list_active_tasks as todoist_list_tasks, TodoistError, default_project_id
+from .services.streaks import compute_day_status, compute_streak, format_status_line
 from .services.timeutil import today_in_tz
 from .commands import _build_daily_event_index
 
@@ -18,9 +20,7 @@ from .commands import _build_daily_event_index
 TEST_TRIGGERS: dict[str, dict] = {}
 
 
-# -----------------------------
 # Time helpers
-# -----------------------------
 
 def _utc_now() -> datetime:
     # naive UTC; we always localize when needed
@@ -40,9 +40,7 @@ async def _send(app, chat_id: str, text: str) -> None:
     await app.bot.send_message(chat_id=int(chat_id), text=text)
 
 
-# -----------------------------
 # Meal times
-# -----------------------------
 
 def _load_meal_times() -> Dict[str, str]:
     """
@@ -52,7 +50,7 @@ def _load_meal_times() -> Dict[str, str]:
     """
     defaults = {"breakfast": "08:30", "fruit": "12:00", "lunch": "14:00", "dinner": "19:00"}
 
-    raw = os.environ.get("MEAL_TIMES_JSON", "").strip()
+    raw = MEAL_TIMES_JSON
     if not raw:
         return defaults
 
@@ -82,9 +80,7 @@ def _meal_lookup(meal_times: Dict[str, str]) -> Dict[str, str]:
     return inv
 
 
-# -----------------------------
 # Dedupe gate (important)
-# -----------------------------
 
 def _checkin_exists(db, user_id: int, day, kind: str, ref: str) -> bool:
     return (
@@ -100,9 +96,7 @@ def _mark_checkin(db, user_id: int, day, kind: str, ref: str) -> None:
     db.commit()
 
 
-# -----------------------------
 # Daily prompts
-# -----------------------------
 
 async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> None:
     """
@@ -127,8 +121,15 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
             except TodoistError as e:
                 todos_msg = f"(Todoist error: {e})"
 
+            day = today_in_tz(u.timezone)
+            st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            status_line = format_status_line(st)
+            streak_line = f"Streak: {cur} day(s) (best {best})"
+
             msg = (
                 "Morning! Please set up today’s calendar.\n\n"
+                f"{status_line}\n{streak_line}\n\n"
                 "Todos:\n" + todos_msg + "\n\n"
                 "People:\n" + people_msg
             )
@@ -153,13 +154,21 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
 
     elif hhmm == "21:00":
         if not _checkin_exists(db, u.id, day, "daily", "winddown"):
-            await _send(app, u.telegram_chat_id, "Wind-down: 2 min brain dump + pick tomorrow’s TODOs.")
+            day = today_in_tz(u.timezone)
+            st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            status_line = format_status_line(st)
+            streak_line = f"Streak: {cur} day(s) (best {best})"
+            await _send(
+                app,
+                u.telegram_chat_id,
+                "Wind-down: 2 min brain dump + pick tomorrow’s TODOs.\n\n"
+                f"{status_line}\n{streak_line}"
+            )
             _mark_checkin(db, u.id, day, "daily", "winddown")
 
 
-# -----------------------------
 # Meal prompts
-# -----------------------------
 
 async def _maybe_fire_meal_checkins(app, db, u: User, now_local: datetime, meal_by_time: Dict[str, str]) -> None:
     hhmm = now_local.strftime("%H:%M")
@@ -176,9 +185,7 @@ async def _maybe_fire_meal_checkins(app, db, u: User, now_local: datetime, meal_
     _mark_checkin(db, u.id, day, "meal", meal)
 
 
-# -----------------------------
 # Event photo check-ins (start + 5 min)
-# -----------------------------
 
 async def _maybe_fire_event_checkins(app, db, u: User, now_local: datetime) -> None:
     day = today_in_tz(u.timezone)
@@ -218,9 +225,7 @@ async def _maybe_fire_event_checkins(app, db, u: User, now_local: datetime) -> N
         _mark_checkin(db, u.id, day, "event", ref)
 
 
-# -----------------------------
 # TEST mode (fast-fire)
-# -----------------------------
 
 async def _maybe_fire_test_prompts(app, db, u: User, now_local: datetime) -> None:
     """
@@ -261,9 +266,7 @@ async def _maybe_fire_test_prompts(app, db, u: User, now_local: datetime) -> Non
         await _send(app, u.telegram_chat_id, "TEST 21:00 (wind-down)")
 
 
-# -----------------------------
 # Entry points
-# -----------------------------
 
 def start_scheduler(app) -> None:
     app.job_queue.run_repeating(tick, interval=60, first=1)
@@ -271,7 +274,7 @@ def start_scheduler(app) -> None:
 
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     app = context.application
-    test_mode = os.environ.get("TEST_SCHEDULE", "0") == "1"
+    test_mode = (TEST_SCHEDULE == "1")
 
     meal_times = _load_meal_times()
     meal_by_time = _meal_lookup(meal_times)
