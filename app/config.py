@@ -9,7 +9,7 @@ load_dotenv(ROOT / ".env")
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///schedulerbot.db")
 DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "America/New_York")
-GCAL_ICS_URLS = json.loads(os.environ.get("GCAL_ICS_URLS_JSON", "{}")).strip()
+GCAL_ICS_URLS = json.loads(os.environ.get("GCAL_ICS_URLS_JSON", "{}"))
 TODOIST_API_TOKEN = os.environ.get("TODOIST_API_TOKEN", "")
 TODOIST_PROJECT_ID = os.environ.get("TODOIST_PROJECT_ID")
 ALLOWED_MISSES_PER_DAY = int(os.environ.get("ALLOWED_MISSES_PER_DAY", "1"))
