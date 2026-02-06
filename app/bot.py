@@ -190,6 +190,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ = handle_text_command(chat_id, "HELP")
     await update.message.reply_text("✅ Connected. Send /help for commands.")
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # logs stacktrace automatically; optionally ping you in chat
+    try:
+        err = context.error
+        print("ERROR:", repr(err))
+    except Exception:
+        pass
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text() + "\n\nExtras:\n/status\n/streak")
@@ -343,6 +351,8 @@ def main() -> None:
 
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    app.add_error_handler(on_error)
 
     start_scheduler(app)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

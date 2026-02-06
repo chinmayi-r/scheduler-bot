@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 
 import json
+import os
 
 from ..config import GCAL_ICS_URLS_JSON
 
@@ -24,16 +25,44 @@ class CalEvent:
 
 
 def _load_ics_urls() -> Dict[str, str]:
-    raw = GCAL_ICS_URLS_JSON
-    if not raw:
+    """
+    Accept GCAL_ICS_URLS_JSON as either:
+      - a JSON string: {"cal1":"https://...ics", "cal2":"https://...ics"}
+      - an already-parsed dict (some deploy platforms do this)
+    """
+    raw = os.environ.get("GCAL_ICS_URLS_JSON", None)
+    if raw is None or raw == "":
         raise RuntimeError("GCAL_ICS_URLS_JSON is not set")
-    try:
-        d = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError("GCAL_ICS_URLS_JSON is not valid JSON") from e
+
+    # If the platform injected parsed JSON already:
+    if isinstance(raw, dict):
+        d = raw
+    else:
+        # Normal case: env var is a string
+        if not isinstance(raw, (str, bytes, bytearray)):
+            raise RuntimeError(f"GCAL_ICS_URLS_JSON has unsupported type: {type(raw)}")
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="replace")
+        raw = raw.strip()
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError("GCAL_ICS_URLS_JSON is not valid JSON") from e
+
     if not isinstance(d, dict) or not d:
         raise RuntimeError("GCAL_ICS_URLS_JSON must be a non-empty JSON object")
-    return {str(k): str(v) for k, v in d.items()}
+
+    # stringify keys/values
+    out: Dict[str, str] = {}
+    for k, v in d.items():
+        if v is None:
+            continue
+        out[str(k)] = str(v)
+
+    if not out:
+        raise RuntimeError("GCAL_ICS_URLS_JSON contained no usable calendar URLs")
+
+    return out
 
 
 def _day_window_local(tz_name: str, day: date) -> Tuple[datetime, datetime]:
