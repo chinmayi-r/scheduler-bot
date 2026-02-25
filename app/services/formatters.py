@@ -55,35 +55,45 @@ def format_events(events: list[DailyEventIndex], tz_name: str = "UTC") -> str:
     return "\n".join(lines)
 
 
-def format_todoist_tasks_numbered(tasks: list[TodoistTask]) -> str:
+
+
+def format_todoist_tasks_numbered(tasks: list[TodoistTask], tz_name: str = "America/New_York") -> str:
     if not tasks:
         return "No active tasks."
 
+    tz = pytz.timezone(tz_name)
+    now = datetime.now(tz)
+
     lines = []
     for i, t in enumerate(tasks, start=1):
-
         due_txt = ""
-        if t.due:
-            # Todoist due object can contain:
-            # - due["string"] (human readable)
-            # - due["date"] (ISO date)
-            # - due["datetime"] (ISO datetime)
+        overdue = False
 
-            if t.due.get("string"):
-                due_txt = f" — due {t.due['string']}"
-            elif t.due.get("datetime"):
+        if t.due:
+            # Priority order: datetime > date > string
+            if t.due.get("datetime"):
                 try:
                     dt = datetime.fromisoformat(t.due["datetime"].replace("Z", "+00:00"))
-                    due_txt = f" — due {dt.strftime('%a %H:%M')}"
+                    dt_local = dt.astimezone(tz)
+                    due_txt = f" — due {dt_local.strftime('%a %H:%M')}"
+                    overdue = dt_local < now
                 except Exception:
                     due_txt = f" — due {t.due['datetime']}"
+
             elif t.due.get("date"):
-                due_txt = f" — due {t.due['date']}"
-                
-        if t.due and t.due.get("is_overdue"):
+                try:
+                    d = date.fromisoformat(t.due["date"])
+                    due_txt = f" — due {d.strftime('%a %b %d')}"
+                    overdue = d < now.date()
+                except Exception:
+                    due_txt = f" — due {t.due['date']}"
+
+            elif t.due.get("string"):
+                due_txt = f" — due {t.due['string']}"
+
+        if overdue:
             due_txt += " ⚠️ overdue"
 
         lines.append(f"{i}) {t.content}{due_txt}")
 
     return "\n".join(lines)
-
