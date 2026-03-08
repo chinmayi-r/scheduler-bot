@@ -1,0 +1,23 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/scheduler-bot
+            git pull origin main
+            /home/ubuntu/venv/bin/pip install -r requirements.txt -q
+            sudo systemctl restart schedulerbot
+            sleep 3
+            sudo systemctl is-active --quiet schedulerbot && echo "Bot is running" || (echo "Bot failed to start" && sudo journalctl -u schedulerbot -n 20 --no-pager && exit 1)
