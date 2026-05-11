@@ -1,0 +1,18 @@
+app = "scheduler-bot"
+primary_region = "iad"
+
+[build]
+
+[env]
+DATABASE_URL = "sqlite:////data/schedulerbot.db"
+
+# No [http_service] — this is a background worker, not a web server.
+
+[[vm]]
+memory = "256mb"
+cpu_kind = "shared"
+cpus = 1
+
+[mounts]
+source = "scheduler_bot_data"
+destination = "/data"
