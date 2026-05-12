@@ -1,0 +1,14 @@
+[Unit]
+Description=Scheduler Telegram Bot
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/scheduler-bot
+ExecStart=/home/ubuntu/venv/bin/python -m app.bot
+EnvironmentFile=/home/ubuntu/scheduler-bot/.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
