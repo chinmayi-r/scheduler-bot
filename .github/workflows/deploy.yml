@@ -18,6 +18,8 @@ jobs:
             cd /home/ubuntu/scheduler-bot
             git pull origin main
             /home/ubuntu/venv/bin/pip install -r requirements.txt -q
+            sudo cp deploy/schedulerbot.service /etc/systemd/system/schedulerbot.service
+            sudo systemctl daemon-reload
             sudo systemctl restart schedulerbot
             sleep 3
             sudo systemctl is-active --quiet schedulerbot && echo "Bot is running" || (echo "Bot failed to start" && sudo journalctl -u schedulerbot -n 20 --no-pager && exit 1)
