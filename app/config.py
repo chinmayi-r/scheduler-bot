@@ -15,5 +15,5 @@ TODOIST_PROJECT_ID = os.environ.get("TODOIST_PROJECT_ID")
 ALLOWED_MISSES_PER_DAY = int(os.environ.get("ALLOWED_MISSES_PER_DAY", "1"))
 MEAL_TIMES_JSON = os.environ.get("MEAL_TIMES_JSON", "").strip()
 BOT_INSTANCE_LOCK = os.environ.get("BOT_INSTANCE_LOCK", "1")
-STORE_PHOTO_FILE_ID = os.environ.get("STORE_PHOTO_FILE_ID", "1")
+STORE_PHOTO_FILE_ID = os.environ.get("STORE_PHOTO_FILE_ID", "1") == "1"
 TEST_SCHEDULE = os.environ.get("TEST_SCHEDULE", "0")

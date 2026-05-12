@@ -178,7 +178,9 @@ def handle_text_command(chat_id: str, text: str) -> str:
         tz = m.group(1)
         db = SessionLocal()
         try:
-            u = db.query(User).filter(User.telegram_chat_id == chat_id).one()
+            u = db.query(User).filter(User.telegram_chat_id == chat_id).one_or_none()
+            if u is None:
+                return "Run /start first."
             u.timezone = tz
             db.commit()
             return f"✅ Timezone set to {tz}."

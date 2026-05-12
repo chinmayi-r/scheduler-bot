@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 
+import hashlib
 import json
 import os
 
@@ -190,7 +191,7 @@ def _events_from_one_ics(
             end_utc = end.astimezone(pytz.utc)
 
         title = str(comp.get("SUMMARY", "Untitled")).strip()
-        uid = str(comp.get("UID", "")).strip() or f"no-uid-{hash(title)}"
+        uid = str(comp.get("UID", "")).strip() or f"no-uid-{hashlib.md5(title.encode()).hexdigest()[:8]}"
 
         # unique per occurrence
         event_id = f"{source}:{uid}:{start_utc.isoformat()}"

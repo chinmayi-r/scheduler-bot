@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 
 import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from .config import TELEGRAM_BOT_TOKEN, STORE_PHOTO_FILE_ID, ALLOWED_MISSES_PER_DAY, BOT_INSTANCE_LOCK
-from .db import init_db, SessionLocal, User, Checkin, DailyEventIndex
+from .db import init_db, SessionLocal, User, Checkin
 from .commands import handle_text_command, help_text
+from .services.streaks import compute_day_status, compute_streak
 from .services.timeutil import today_in_tz
 from .scheduler import start_scheduler
 
@@ -68,121 +69,6 @@ def _pending_event_checkin(db, user: User, day: date) -> Checkin | None:
     )
 
 
-def _count_required_events(db, user: User, day: date) -> int:
-    """
-    FINAL event list: whatever DailyEventIndex currently contains for today.
-    """
-    return (
-        db.query(DailyEventIndex)
-        .filter(DailyEventIndex.user_id == user.id, DailyEventIndex.day == day)
-        .count()
-    )
-
-
-def _count_completed_event_photos(db, user: User, day: date) -> int:
-    """
-    Event completion requires a photo.
-    """
-    q = (
-        db.query(Checkin)
-        .filter(
-            Checkin.user_id == user.id,
-            Checkin.day == day,
-            Checkin.kind == "event",
-            Checkin.responded_at.is_not(None),
-        )
-    )
-
-    # If you choose not to store file_id, completion is still "responded_at + caption"
-    # But your rule is "photo sent" so we treat "photo checkin handler" as completion.
-    # That handler sets responded_at; optionally file_id.
-    # To be strict: require either file_id OR response_text (caption) was set by photo handler.
-    q = q.filter(
-        (Checkin.photo_file_id.is_not(None)) | (Checkin.response_text.is_not(None))
-    )
-    return q.count()
-
-
-def _count_completed_daily(db, user: User, day: date) -> int:
-    """
-    Daily completion requires responded_at (text reply is fine).
-    """
-    return (
-        db.query(Checkin)
-        .filter(
-            Checkin.user_id == user.id,
-            Checkin.day == day,
-            Checkin.kind == "daily",
-            Checkin.responded_at.is_not(None),
-        )
-        .count()
-    )
-
-
-def _required_daily_count() -> int:
-    return 3  # morning, run, winddown
-
-
-def compute_day_status(db, user: User, day: date) -> dict:
-    """
-    Computes honored status using:
-      required = 3 + (#final events)
-      completed = (#daily responded) + (#event photos responded)
-      honored if misses <= ALLOWED_MISSES_PER_DAY
-    """
-    required_events = _count_required_events(db, user, day)
-    required_total = _required_daily_count() + required_events
-
-    completed_daily = _count_completed_daily(db, user, day)
-    completed_events = _count_completed_event_photos(db, user, day)
-    completed_total = completed_daily + completed_events
-
-    misses = max(0, required_total - completed_total)
-    honored = misses <= ALLOWED_MISSES_PER_DAY
-
-    return {
-        "day": day.isoformat(),
-        "required_daily": _required_daily_count(),
-        "required_events": required_events,
-        "required_total": required_total,
-        "completed_daily": completed_daily,
-        "completed_event_photos": completed_events,
-        "completed_total": completed_total,
-        "misses": misses,
-        "allowed_misses": ALLOWED_MISSES_PER_DAY,
-        "honored": honored,
-    }
-
-
-def compute_streak(db, user: User, end_day: date) -> tuple[int, int]:
-    """
-    Returns (current_streak_ending_end_day, best_streak_over_window).
-    For simplicity we scan back up to 365 days.
-    """
-    best = 0
-    cur = 0
-
-    # Build a set of honored days quickly by scanning backwards
-    # (cheap at your scale)
-    d = end_day
-    for i in range(0, 365):
-        st = compute_day_status(db, user, d)
-        if st["honored"]:
-            cur += 1
-            best = max(best, cur)
-        else:
-            best = max(best, cur)
-            cur = 0
-            # if we already broke the streak at the end, we can stop early
-            if i == 0:
-                break
-        d = d - timedelta(days=1)
-
-    # If today honored, cur is current streak; if today not honored, cur will be 0 (after break)
-    # For best, we already tracked.
-    return cur, best
-
-
 # Handlers
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -213,7 +99,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         day = _today_user(user)
-        st = compute_day_status(db, user, day)
+        st = compute_day_status(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
 
         msg = (
             f"📊 Today ({st['day']})\n"
@@ -237,7 +123,7 @@ async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         day = _today_user(user)
-        cur, best = compute_streak(db, user, day)
+        cur, best = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
         await update.message.reply_text(f"🔥 Streak: {cur} day(s) in a row.\n🏆 Best (last 365d scan): {best}")
     finally:
         db.close()

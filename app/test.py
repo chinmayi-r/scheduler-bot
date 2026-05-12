@@ -42,7 +42,7 @@ def main():
 
     check("DEFAULT_TIMEZONE", config.DEFAULT_TIMEZONE)
 
-    check("GCAL_ICS_URLS", config.GCAL_ICS_URLS)
+    check("GCAL_ICS_URLS_JSON", config.GCAL_ICS_URLS_JSON)
 
     check("TODOIST_API_TOKEN", config.TODOIST_API_TOKEN)
 
@@ -63,7 +63,7 @@ def main():
 
     check("BOT_INSTANCE_LOCK", config.BOT_INSTANCE_LOCK, validate_bool_string)
 
-    check("STORE_PHOTO_FILE_ID", config.STORE_PHOTO_FILE_ID, validate_bool_string)
+    check("STORE_PHOTO_FILE_ID", config.STORE_PHOTO_FILE_ID)
 
     print("\n========== DONE ==========")
 
