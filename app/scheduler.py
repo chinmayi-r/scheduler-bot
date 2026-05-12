@@ -112,12 +112,13 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
 
     if hhmm == "07:00":
         if not _checkin_exists(db, u.id, day, "daily", "morning"):
+            # Only show people due or overdue today
             people = db.query(Person).filter(Person.user_id == u.id).all()
-            people_msg = format_people(people, u.timezone)
+            people_msg = format_people(people, u.timezone, due_only=True)
 
             try:
                 tasks = todoist_list_tasks(project_id=default_project_id())
-                todos_msg = format_todoist_tasks_numbered(tasks)
+                todos_msg = format_todoist_tasks_numbered(tasks, tz_name=u.timezone)
             except TodoistError as e:
                 todos_msg = f"(Todoist error: {e})"
 
@@ -125,13 +126,13 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
             st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             status_line = format_status_line(st)
-            streak_line = f"Streak: {cur} day(s) (best {best})"
+            streak_line = f"🔥 {cur}d streak (best {best})"
 
             msg = (
-                "Morning! Please set up today’s calendar.\n\n"
-                f"{status_line}\n{streak_line}\n\n"
-                "Todos:\n" + todos_msg + "\n\n"
-                "People:\n" + people_msg
+                f"Morning! Set up today’s calendar by 7:15.\n\n"
+                f"{status_line}  {streak_line}\n\n"
+                f"Todos:\n{todos_msg}\n\n"
+                f"People due:\n{people_msg}"
             )
             await _send(app, u.telegram_chat_id, msg)
             _mark_checkin(db, u.id, day, "daily", "morning")
@@ -144,12 +145,35 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
                 .filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day)
                 .all()
             )
-            await _send(app, u.telegram_chat_id, "Today’s events:\n" + format_events(events, u.timezone))
+            has_run = any("run" in ev.title.lower() for ev in events)
+            if not events:
+                msg = (
+                    "⚠️ Nothing on your calendar — your morning is unprotected.\n\n"
+                    "No run blocked either. Last chance to add one before 7:30."
+                )
+            elif not has_run:
+                msg = (
+                    "Today’s events:\n" + format_events(events, u.timezone) +
+                    "\n\n⚠️ No run on calendar — add one now if you’re going at 7:30."
+                )
+            else:
+                msg = "Today’s events:\n" + format_events(events, u.timezone)
+            await _send(app, u.telegram_chat_id, msg)
             _mark_checkin(db, u.id, day, "daily", "events_list")
 
     elif hhmm == "07:30":
         if not _checkin_exists(db, u.id, day, "daily", "run"):
-            await _send(app, u.telegram_chat_id, "Running time! Shoes on. Reply when you’re back.")
+            events = (
+                db.query(DailyEventIndex)
+                .filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day)
+                .all()
+            )
+            has_run = any("run" in ev.title.lower() for ev in events)
+            if has_run:
+                msg = "Running time! Shoes on. Reply when you’re back."
+            else:
+                msg = "Running time — nothing on calendar, but you know you should. Shoes on. Reply when back."
+            await _send(app, u.telegram_chat_id, msg)
             _mark_checkin(db, u.id, day, "daily", "run")
 
     elif hhmm == "21:00":
@@ -158,12 +182,12 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
             st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             status_line = format_status_line(st)
-            streak_line = f"Streak: {cur} day(s) (best {best})"
+            streak_line = f"🔥 {cur}d streak (best {best})"
             await _send(
                 app,
                 u.telegram_chat_id,
-                "Wind-down: 2 min brain dump + pick tomorrow’s TODOs.\n\n"
-                f"{status_line}\n{streak_line}"
+                f"Wind-down: 2 min brain dump + pick tomorrow’s TODOs.\n\n"
+                f"{status_line}  {streak_line}"
             )
             _mark_checkin(db, u.id, day, "daily", "winddown")
 

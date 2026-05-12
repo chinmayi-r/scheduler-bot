@@ -44,8 +44,9 @@ class Person(Base):
     note = Column(String, nullable=False)      # one-line note
 
     # day tracking
-    start_day = Column(Date, nullable=True)    # local date when tracking started/reset
-    base_days = Column(Integer, nullable=True) # user-entered offset, can be negative
+    start_day    = Column(Date, nullable=True)    # local date when tracking started/reset
+    base_days    = Column(Integer, nullable=True) # reach out every N days
+    last_contact = Column(Date, nullable=True)    # date of most recent contact
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

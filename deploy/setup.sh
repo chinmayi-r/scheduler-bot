@@ -7,9 +7,9 @@ REPO_URL="https://github.com/chinmayi-r/scheduler-bot.git"  # update if differen
 APP_DIR="/home/ubuntu/scheduler-bot"
 VENV_DIR="/home/ubuntu/venv"
 
-echo "==> Updating packages and installing Python 3.11..."
+echo "==> Updating packages and installing Python..."
 sudo apt-get update -q
-sudo apt-get install -y python3.11 python3.11-venv python3-pip git
+sudo apt-get install -y python3 python3-venv python3-pip git
 
 echo "==> Cloning repo..."
 if [ -d "$APP_DIR" ]; then
@@ -20,7 +20,7 @@ else
 fi
 
 echo "==> Creating virtualenv and installing dependencies..."
-python3.11 -m venv "$VENV_DIR"
+python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip -q
 "$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 
