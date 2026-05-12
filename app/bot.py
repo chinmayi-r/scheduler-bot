@@ -101,12 +101,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         day = _today_user(user)
         st = compute_day_status(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
 
+        icon = "✅" if st["honored"] else "❌"
         msg = (
-            f"📊 Today ({st['day']})\n"
-            f"Required: {st['required_total']} = daily 3 + events {st['required_events']}\n"
-            f"Completed: {st['completed_total']} = daily {st['completed_daily']} + event-photos {st['completed_event_photos']}\n"
-            f"Misses: {st['misses']} (allowed {st['allowed_misses']})\n"
-            f"Honored today: {'YES' if st['honored'] else 'NO'}"
+            f"{icon} {st['completed_total']}/{st['required_total']}  🔥 {cur}d streak\n\n"
+            f"daily: {st['completed_daily']}/{st['required_daily']}  |  "
+            f"events: {st['completed_event_photos']}/{st['required_events']}\n"
+            f"misses: {st['misses']} (allowed {st['allowed_misses']})"
         )
         await update.message.reply_text(msg)
     finally:

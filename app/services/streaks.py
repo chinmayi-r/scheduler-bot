@@ -53,6 +53,7 @@ def compute_day_status(db, user: User, day: date, allowed_misses: int = 1) -> di
 
     return {
         "day": day.isoformat(),
+        "required_daily": _required_daily_count(),
         "required_events": required_events,
         "required_total": required_total,
         "completed_daily": completed_daily,
@@ -87,9 +88,9 @@ def compute_streak(db, user: User, end_day: date, allowed_misses: int = 1) -> tu
     return cur, best
 
 def format_status_line(st: dict) -> str:
+    icon = "✅" if st["honored"] else "❌"
     misses_left = max(0, st["allowed_misses"] - st["misses"])
     return (
-        f"Status: {st['completed_total']}/{st['required_total']} done "
-        f"(misses {st['misses']}, left {misses_left}). "
-        f"Honored today: {'YES' if st['honored'] else 'NO'}"
+        f"{icon} {st['completed_total']}/{st['required_total']} done "
+        f"(misses: {st['misses']}, {misses_left} left)"
     )
