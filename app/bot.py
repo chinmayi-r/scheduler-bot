@@ -100,6 +100,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         day = _today_user(user)
         st = compute_day_status(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+        cur, best = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
 
         icon = "✅" if st["honored"] else "❌"
         msg = (
@@ -176,10 +177,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db.close()
 
 
+def _pending_meal_checkin(db, user: User, day: date) -> Checkin | None:
+    """Latest unresponded meal checkin for today."""
+    return (
+        db.query(Checkin)
+        .filter(
+            Checkin.user_id == user.id,
+            Checkin.day == day,
+            Checkin.kind == "meal",
+            Checkin.responded_at.is_(None),
+        )
+        .order_by(Checkin.prompted_at.desc())
+        .first()
+    )
+
+
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Attach photo to most recent pending EVENT checkin for today.
-    Store caption always; store file_id only if STORE_PHOTO_FILE_ID=1.
+    Attach photo to most recent pending EVENT or MEAL checkin for today.
+    Event checkins take priority. Store caption always; store file_id only if STORE_PHOTO_FILE_ID=1.
     """
     chat_id = str(update.effective_chat.id)
     caption = (update.message.caption or "").strip()
@@ -193,12 +209,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         day = _today_user(user)
 
-        pending = _pending_event_checkin(db, user, day)
+        pending = _pending_event_checkin(db, user, day) or _pending_meal_checkin(db, user, day)
         if not pending:
-            await update.message.reply_text("📷 Got it — but there’s no pending EVENT check-in right now.")
+            await update.message.reply_text("📷 Got it — but there’s no pending check-in right now. Photo not saved to a check-in.")
             return
 
-        # highest resolution photo is last
         photo = update.message.photo[-1]
         file_id = photo.file_id
 
@@ -208,7 +223,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         db.commit()
 
-        await update.message.reply_text("✅ Logged for the event check-in.")
+        label = "event" if pending.kind == "event" else f"{pending.ref} meal"
+        await update.message.reply_text(f"✅ Photo logged for {label} check-in.")
 
     finally:
         db.close()
