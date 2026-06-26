@@ -12,7 +12,7 @@ from .db import SessionLocal, User, Person, DailyEventIndex, Checkin
 from .config import MEAL_TIMES_JSON, TEST_SCHEDULE, ALLOWED_MISSES_PER_DAY 
 from .services.formatters import format_events, format_people, format_todoist_tasks_numbered
 from .services.todoist import list_active_tasks as todoist_list_tasks, TodoistError, default_project_id
-from .services.streaks import compute_day_status, compute_streak, format_status_line
+from .services.streaks import compute_day_status, compute_streak, format_status_line, format_streak_line
 from .services.timeutil import today_in_tz
 from .commands import _build_daily_event_index
 
@@ -124,9 +124,9 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
 
             day = today_in_tz(u.timezone)
             st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            cur, best, in_progress = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             status_line = format_status_line(st)
-            streak_line = f"🔥 {cur}d streak (best {best})"
+            streak_line = format_streak_line(cur, best, in_progress)
 
             msg = (
                 f"Morning! Set up today’s calendar by 7:15.\n\n"
@@ -180,9 +180,9 @@ async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> No
         if not _checkin_exists(db, u.id, day, "daily", "winddown"):
             day = today_in_tz(u.timezone)
             st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+            cur, best, in_progress = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
             status_line = format_status_line(st)
-            streak_line = f"🔥 {cur}d streak (best {best})"
+            streak_line = format_streak_line(cur, best, in_progress)
             await _send(
                 app,
                 u.telegram_chat_id,

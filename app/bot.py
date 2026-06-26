@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from .config import TELEGRAM_BOT_TOKEN, STORE_PHOTO_FILE_ID, ALLOWED_MISSES_PER_DAY, BOT_INSTANCE_LOCK
 from .db import init_db, SessionLocal, User, Checkin
 from .commands import handle_text_command, help_text
-from .services.streaks import compute_day_status, compute_streak
+from .services.streaks import compute_day_status, compute_streak, format_streak_line
 from .services.timeutil import today_in_tz
 from .scheduler import start_scheduler
 
@@ -100,11 +100,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         day = _today_user(user)
         st = compute_day_status(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-        cur, best = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+        cur, best, in_progress = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
 
-        icon = "✅" if st["honored"] else "❌"
+        icon = "✅" if st["honored"] else "⏳"
         msg = (
-            f"{icon} {st['completed_total']}/{st['required_total']}  🔥 {cur}d streak\n\n"
+            f"{icon} {st['completed_total']}/{st['required_total']}  {format_streak_line(cur, best, in_progress)}\n\n"
             f"daily: {st['completed_daily']}/{st['required_daily']}  |  "
             f"events: {st['completed_event_photos']}/{st['required_events']}\n"
             f"misses: {st['misses']} (allowed {st['allowed_misses']})"
@@ -124,8 +124,8 @@ async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         day = _today_user(user)
-        cur, best = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-        await update.message.reply_text(f"🔥 Streak: {cur} day(s) in a row.\n🏆 Best (last 365d scan): {best}")
+        cur, best, in_progress = compute_streak(db, user, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
+        await update.message.reply_text(format_streak_line(cur, best, in_progress))
     finally:
         db.close()
 
