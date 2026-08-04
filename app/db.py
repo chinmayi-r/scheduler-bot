@@ -120,6 +120,25 @@ class Person(Base):
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_people_user_name"),)
 
 
+class InboxSuggestion(Base):
+    """
+    A task suggested by something other than you typing it -- currently Pocket's
+    extracted action items. Held for one-tap approval rather than auto-created,
+    so an hour of conversation can't quietly flood your real task list.
+    """
+    __tablename__ = "inbox_suggestions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    text = Column(Text, nullable=False)
+    source = Column(String, nullable=False, default="pocket")
+    external_ref = Column(String, nullable=True)  # recording/action-item id, for dedupe
+    status = Column(String, nullable=False, default="pending")  # pending|added|dismissed
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class MealLog(Base):
     __tablename__ = "meal_log"
 

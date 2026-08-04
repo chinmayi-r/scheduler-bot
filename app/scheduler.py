@@ -208,15 +208,12 @@ async def _job_morning(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not tasks:
             text += "\n\n(No active Todoist tasks found — add one by just texting me anything.)"
 
-        msg = await context.bot.send_message(
+        # No server-side selection state: the message's own checkboxes are the
+        # source of truth, so a redeploy mid-planning can't break the buttons.
+        await context.bot.send_message(
             chat_id=int(user.telegram_chat_id), text=text,
             reply_markup=keyboards.morning_plan_keyboard(tasks, set()),
         )
-        context.bot_data.setdefault("plan_selection", {})[user.id] = {
-            "tasks": {t.id: t.content for t in tasks},
-            "selected": set(),
-            "message_id": msg.message_id,
-        }
 
         _schedule_escalation(context.application, user.id, "morning", "", day.isoformat())
     finally:

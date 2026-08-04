@@ -27,21 +27,45 @@ feel like total failure. Concretely:
   what you last talked about — not just a countdown timer.
 - **Calendar is read-only context**, not another thing to maintain.
 
-## Commands
+## Using it
 
-Nothing requires syntax — just text the bot anything to capture it as a task.
+**Type anything and it becomes a task.** That's the primary interface. Voice
+notes work the same way (transcribed, then captured), which is usually faster
+than typing mid-thought.
 
-- `/today` — everything visible at once: calendar, today's plan, people due, meals
-- `/tasks` — active tasks, tap to mark done
-- `/people` — people you're tracking, tap to log contact
+A **persistent button row** sits above the keyboard permanently — 📋 Today,
+✅ Tasks, 🔨 Break down, ⚙️ More — so the app stays visible instead of only
+existing when you remember it. All commands also appear under Telegram's Menu
+button, so nothing has to be memorised.
+
+- `/today` — calendar, today's plan, people due, meals, streak
+- `/tasks` — active tasks; tap ✅ to finish, 🔨 to break one down
+- `/breakdown` — split a task that feels too big into steps, first one under 2 min
+- `/inbox` — action items waiting from Pocket
+- `/people` — people you're tracking; ✅ contacted, 💤 snooze, 📝 add a note
 - `/meals` — today's meal check-ins
 - `/streak` — how you're doing
-- `/settings` — change timezone, ping times, toggle features
-- `/help`
+- `/settings` — timezone, ping times, feature toggles
+- `/cancel` — escape any half-finished flow
+- `/help` — short, with buttons to drill in
 
-Send a photo any time there's an open meal check-in and it attaches automatically.
-Send a voice note any time (if `OPENAI_API_KEY` is set) and it's transcribed and
-captured just like text.
+Send a photo and it attaches to the open meal check-in (or the next unlogged
+meal). Abandoned flows expire on their own, and whatever you type next is
+captured as a task rather than swallowed.
+
+## Optional integrations
+
+**Break it down** (`LLM_API_KEY`) turns a vague task into 3-5 concrete steps
+whose first step takes under two minutes — the point is defeating task-initiation
+paralysis, not planning. Works against any OpenAI-compatible endpoint and
+defaults to OpenRouter's free tier; it's one call per button press.
+
+**Pocket** (`POCKET_WEBHOOK_SECRET`) syncs action items from your
+[Pocket recorder](https://heypocket.com). Point a Pocket webhook at
+`https://<your-railway-domain>/webhooks/pocket` and the action items it extracts
+from your conversations arrive for one-tap adding — so tasks get written down
+without you writing them down. Deliveries are signature-verified and
+de-duplicated. Set `POCKET_AUTO_CREATE=1` to skip the approval step.
 
 ## Setup
 
@@ -69,7 +93,19 @@ captured just like text.
 - `app/bot.py` — Telegram handlers: onboarding, buttons, capture, voice/photo
 - `app/scheduler.py` — per-user, timezone-aware recurring jobs (morning/midday/
   evening/meals) plus the escalation ladder for ignored prompts
+- `app/webhook.py` — small aiohttp listener for Pocket deliveries, run alongside
+  the poller
+- `app/migrate.py` — non-destructive startup migration from the pre-redesign schema
 - `app/db.py` — SQLAlchemy models: `User`, `DailyLog` (streak/plan tracking),
-  `PendingNudge` (dedupe + escalation), `Person`, `MealLog`
+  `PendingNudge` (dedupe + escalation), `Person`, `MealLog`, `InboxSuggestion`
 - `app/services/` — Todoist, Google Calendar (ICS), people, meals, streaks,
-  voice transcription, capture
+  voice transcription, capture, LLM breakdown, Pocket
+
+Two deliberate design choices worth knowing if you edit this:
+
+- **Morning-plan selection lives in the message, not the server.** The
+  checkboxes in the inline keyboard *are* the state, so a redeploy mid-planning
+  can't invalidate the buttons.
+- **Multi-step flows expire.** An abandoned flow releases after 15 minutes and
+  the next thing you type is captured normally instead of being consumed as an
+  answer.
