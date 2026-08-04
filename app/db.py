@@ -138,4 +138,19 @@ class MealLog(Base):
 
 
 def init_db() -> None:
+    """Creates missing tables, migrating any pre-redesign schema first so an
+    existing deployment's database doesn't crash on the new columns."""
+    from .migrate import detect_legacy_tables, stash_legacy_tables, restore_rescued_rows
+
+    legacy = detect_legacy_tables(engine)
+    rescued = stash_legacy_tables(engine, legacy) if legacy else {}
+
     Base.metadata.create_all(bind=engine)
+
+    if rescued:
+        counts = restore_rescued_rows(engine, rescued)
+        print(
+            f"Migrated legacy schema {legacy}: "
+            f"{counts['users']} user(s), {counts['people']} person/people carried over. "
+            f"Old tables kept as *_legacy_backup."
+        )
