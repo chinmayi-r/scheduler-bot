@@ -831,16 +831,50 @@ async def _post_init(application: Application) -> None:
     schedule_all_active_users(application)
 
 
-def main() -> None:
-    if BOT_INSTANCE_LOCK == "1":
-        lock_path = "/tmp/tg_bot.lock"
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
+
+
+def _acquire_instance_lock(lock_path: str) -> None:
+    """Guards against two pollers in one container. Critically, a lock left
+    behind by a crashed process must not block the restart forever — that turns
+    a one-off crash into a permanently dead bot."""
+    for _attempt in range(2):
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
+            return
         except FileExistsError:
-            print("Bot already running (lock exists). Exiting.")
-            sys.exit(0)
+            try:
+                with open(lock_path) as fh:
+                    prev_pid = int((fh.read() or "0").strip())
+            except (ValueError, OSError):
+                prev_pid = 0
+
+            if prev_pid and prev_pid != os.getpid() and _pid_alive(prev_pid):
+                print(f"Bot already running (pid {prev_pid}). Exiting.")
+                sys.exit(0)
+
+            print(f"Removing stale lock from dead pid {prev_pid or 'unknown'}.")
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass  # another starter cleaned it up; loop retries the create
+
+    print("Could not acquire instance lock. Exiting.")
+    sys.exit(0)
+
+
+def main() -> None:
+    if BOT_INSTANCE_LOCK == "1":
+        _acquire_instance_lock("/tmp/tg_bot.lock")
 
     init_db()
 
