@@ -1,96 +1,77 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, date
-import pytz
+import json
+from datetime import timedelta, date
 
-from ..db import Checkin, DailyEventIndex, User
+from ..db import DailyLog, User
 
-def _required_daily_count() -> int:
-    return 3  # morning, run, winddown
 
-def _count_required_events(db, user: User, day: date) -> int:
-    return (
-        db.query(DailyEventIndex)
-        .filter(DailyEventIndex.user_id == user.id, DailyEventIndex.day == day)
-        .count()
-    )
+def _get_log(db, user: User, day: date) -> DailyLog | None:
+    return db.query(DailyLog).filter(DailyLog.user_id == user.id, DailyLog.day == day).one_or_none()
 
-def _count_completed_daily(db, user: User, day: date) -> int:
-    return (
-        db.query(Checkin)
-        .filter(
-            Checkin.user_id == user.id,
-            Checkin.day == day,
-            Checkin.kind == "daily",
-            Checkin.responded_at.is_not(None),
-        )
-        .count()
-    )
 
-def _count_completed_event_photos(db, user: User, day: date) -> int:
-    q = (
-        db.query(Checkin)
-        .filter(
-            Checkin.user_id == user.id,
-            Checkin.day == day,
-            Checkin.kind == "event",
-            Checkin.responded_at.is_not(None),
-        )
-        .filter((Checkin.photo_file_id.is_not(None)) | (Checkin.response_text.is_not(None)))
-    )
-    return q.count()
+def get_or_create_log(db, user: User, day: date) -> DailyLog:
+    row = _get_log(db, user, day)
+    if row is None:
+        row = DailyLog(user_id=user.id, day=day)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
 
-def compute_day_status(db, user: User, day: date, allowed_misses: int = 1) -> dict:
-    required_events = _count_required_events(db, user, day)
-    required_total = _required_daily_count() + required_events
 
-    completed_daily = _count_completed_daily(db, user, day)
-    completed_events = _count_completed_event_photos(db, user, day)
-    completed_total = completed_daily + completed_events
-
-    misses = max(0, required_total - completed_total)
-    honored = misses <= allowed_misses
-
-    return {
-        "day": day.isoformat(),
-        "required_daily": _required_daily_count(),
-        "required_events": required_events,
-        "required_total": required_total,
-        "completed_daily": completed_daily,
-        "completed_event_photos": completed_events,
-        "completed_total": completed_total,
-        "misses": misses,
-        "allowed_misses": allowed_misses,
-        "honored": honored,
-    }
-
-def compute_streak(db, user: User, end_day: date, allowed_misses: int = 1) -> tuple[int, int]:
+def is_engaged(db, user: User, day: date) -> bool:
     """
-    (current_streak_ending_end_day, best_streak_over_last_365_days_scan)
+    A day 'counts' if you showed up at all: responded to the morning plan,
+    completed at least one task, or did the wind-down. Deliberately generous —
+    the point is showing up, not perfection.
     """
-    best = 0
+    row = _get_log(db, user, day)
+    if row is None:
+        return False
+    if row.morning_responded_at is not None or row.evening_responded_at is not None:
+        return True
+    try:
+        completed = json.loads(row.completed_task_ids_json or "[]")
+    except Exception:
+        completed = []
+    return len(completed) > 0
+
+
+def current_streak(db, user: User, today: date, lookback_days: int = 365) -> int:
+    """
+    'Never miss twice': a single missed day is forgiven and doesn't zero the
+    streak, but two misses in a row ends it. Counts consecutive completed days
+    ending yesterday (today is still in progress, so it isn't judged yet).
+    """
     cur = 0
-
-    d = end_day
-    for i in range(365):
-        st = compute_day_status(db, user, d, allowed_misses=allowed_misses)
-        if st["honored"]:
+    miss_run = 0
+    d = today - timedelta(days=1)
+    for _ in range(lookback_days):
+        if is_engaged(db, user, d):
             cur += 1
-            best = max(best, cur)
+            miss_run = 0
         else:
-            best = max(best, cur)
-            if i == 0:
-                cur = 0
+            miss_run += 1
+            if miss_run >= 2:
                 break
-            cur = 0
-        d = d - timedelta(days=1)
+        d -= timedelta(days=1)
+    return cur
 
-    return cur, best
 
-def format_status_line(st: dict) -> str:
-    icon = "✅" if st["honored"] else "❌"
-    misses_left = max(0, st["allowed_misses"] - st["misses"])
-    return (
-        f"{icon} {st['completed_total']}/{st['required_total']} done "
-        f"(misses: {st['misses']}, {misses_left} left)"
-    )
+def engaged_last_n_days(db, user: User, today: date, n: int = 30) -> int:
+    count = 0
+    d = today - timedelta(days=1)
+    for _ in range(n):
+        if is_engaged(db, user, d):
+            count += 1
+        d -= timedelta(days=1)
+    return count
+
+
+def format_streak_line(db, user: User, today: date) -> str:
+    streak = current_streak(db, user, today)
+    engaged_30 = engaged_last_n_days(db, user, today, 30)
+    if streak == 0:
+        return f"🔥 Day 0 — let's start today. ({engaged_30}/30 days engaged this month)"
+    return f"🔥 Day {streak} — one miss won't break this, two in a row will reset the count (not you). ({engaged_30}/30 this month)"

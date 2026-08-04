@@ -5,10 +5,6 @@ from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 
 import hashlib
-import json
-import os
-
-from ..config import GCAL_ICS_URLS_JSON
 
 import pytz
 import requests
@@ -23,47 +19,6 @@ class CalEvent:
     start_utc: datetime
     end_utc: datetime
     source: str
-
-
-def _load_ics_urls() -> Dict[str, str]:
-    """
-    Accept GCAL_ICS_URLS_JSON as either:
-      - a JSON string: {"cal1":"https://...ics", "cal2":"https://...ics"}
-      - an already-parsed dict (some deploy platforms do this)
-    """
-    raw = os.environ.get("GCAL_ICS_URLS_JSON", None)
-    if raw is None or raw == "":
-        raise RuntimeError("GCAL_ICS_URLS_JSON is not set")
-
-    # If the platform injected parsed JSON already:
-    if isinstance(raw, dict):
-        d = raw
-    else:
-        # Normal case: env var is a string
-        if not isinstance(raw, (str, bytes, bytearray)):
-            raise RuntimeError(f"GCAL_ICS_URLS_JSON has unsupported type: {type(raw)}")
-        if isinstance(raw, (bytes, bytearray)):
-            raw = raw.decode("utf-8", errors="replace")
-        raw = raw.strip()
-        try:
-            d = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise RuntimeError("GCAL_ICS_URLS_JSON is not valid JSON") from e
-
-    if not isinstance(d, dict) or not d:
-        raise RuntimeError("GCAL_ICS_URLS_JSON must be a non-empty JSON object")
-
-    # stringify keys/values
-    out: Dict[str, str] = {}
-    for k, v in d.items():
-        if v is None:
-            continue
-        out[str(k)] = str(v)
-
-    if not out:
-        raise RuntimeError("GCAL_ICS_URLS_JSON contained no usable calendar URLs")
-
-    return out
 
 
 def _day_window_local(tz_name: str, day: date) -> Tuple[datetime, datetime]:
@@ -82,9 +37,7 @@ def _download_ics(url: str) -> bytes:
 
 
 def _pick_tz(tzid: Optional[str], fallback_tz_name: str) -> pytz.BaseTzInfo:
-    """
-    Prefer explicit TZID from ICS property params; else user timezone.
-    """
+    """Prefer explicit TZID from ICS property params; else fallback tz."""
     if tzid:
         try:
             return pytz.timezone(tzid)
@@ -96,9 +49,9 @@ def _pick_tz(tzid: Optional[str], fallback_tz_name: str) -> pytz.BaseTzInfo:
 def _as_aware_dt(dt, tzid: Optional[str], fallback_tz_name: str) -> Optional[datetime]:
     """
     Convert icalendar dt to tz-aware datetime.
-    - If dt is date-only => all-day => return None (skip)
-    - If dt is naive datetime => treat as "floating" local time in TZID or fallback tz
-    - If dt already has tzinfo => keep it
+    - date-only (all-day) => None (skip)
+    - naive datetime => treat as floating local time in TZID or fallback tz
+    - already aware => keep as-is
     """
     if isinstance(dt, date) and not isinstance(dt, datetime):
         return None
@@ -111,9 +64,7 @@ def _as_aware_dt(dt, tzid: Optional[str], fallback_tz_name: str) -> Optional[dat
 
 
 def _get_dtend_or_duration(component, fallback_tz_name: str) -> Optional[datetime]:
-    """
-    Return tz-aware DTEND if present; otherwise DTSTART + DURATION if present.
-    """
+    """Return tz-aware DTEND if present; otherwise DTSTART + DURATION if present."""
     dtstart_prop = component.get("DTSTART")
     if not dtstart_prop:
         return None
@@ -173,7 +124,6 @@ def _events_from_one_ics(
         if start is None:
             if not include_all_day:
                 continue
-            # represent all-day as local day window
             start_utc = day_start_local.astimezone(pytz.utc)
             end_utc = day_end_local.astimezone(pytz.utc)
         else:
@@ -181,7 +131,6 @@ def _events_from_one_ics(
             if end is None:
                 end = start + timedelta(minutes=60)
 
-            # overlap safety check in local tz
             start_local = start.astimezone(tz)
             end_local = end.astimezone(tz)
             if end_local <= day_start_local or start_local >= day_end_local:
@@ -193,7 +142,6 @@ def _events_from_one_ics(
         title = str(comp.get("SUMMARY", "Untitled")).strip()
         uid = str(comp.get("UID", "")).strip() or f"no-uid-{hashlib.md5(title.encode()).hexdigest()[:8]}"
 
-        # unique per occurrence
         event_id = f"{source}:{uid}:{start_utc.isoformat()}"
 
         out.append(CalEvent(
@@ -208,14 +156,27 @@ def _events_from_one_ics(
     return out
 
 
-def fetch_events_for_day_multi_ics(tz_name: str, day: date, include_all_day: bool = False) -> List[CalEvent]:
-    urls = _load_ics_urls()
+def fetch_events_for_day_multi_ics(
+    urls: Dict[str, str],
+    tz_name: str,
+    day: date,
+    include_all_day: bool = False,
+) -> List[CalEvent]:
+    """
+    `urls`: {label: ics_url, ...} — pass User.gcal_ics_urls_json (parsed) here.
+    Returns [] if `urls` is empty rather than raising, since calendar sync is optional.
+    """
+    if not urls:
+        return []
 
     all_events: List[CalEvent] = []
     for source, url in urls.items():
-        all_events.extend(_events_from_one_ics(url, source, tz_name, day, include_all_day=include_all_day))
+        try:
+            all_events.extend(_events_from_one_ics(url, source, tz_name, day, include_all_day=include_all_day))
+        except Exception:
+            # One bad/unreachable calendar shouldn't take down the whole fetch.
+            continue
 
-    # Dedupe across calendars (safe)
     seen = set()
     unique: List[CalEvent] = []
     for e in all_events:

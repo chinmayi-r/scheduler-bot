@@ -19,34 +19,98 @@ class User(Base):
 
     id = Column(Integer, primary_key=True)
     telegram_chat_id = Column(String, unique=True, nullable=False)
+
+    # Conversation state machine: "onb_tz" | "onb_morning" | ... | "active" | "awaiting:<thing>"
+    state = Column(String, nullable=False, default="onb_tz")
+
     timezone = Column(String, nullable=False, default=DEFAULT_TIMEZONE)
 
-    # Later (OAuth):
-    google_refresh_token = Column(Text, nullable=True)
-    google_tasks_refresh_token = Column(Text, nullable=True)
+    # Personalized schedule (local HH:MM strings), set during onboarding / /settings.
+    morning_time = Column(String, nullable=False, default="08:00")
+    midday_time = Column(String, nullable=False, default="13:00")
+    evening_time = Column(String, nullable=False, default="21:00")
+
+    meals_enabled = Column(Boolean, nullable=False, default=True)
+    meal_times_json = Column(Text, nullable=False, default="{}")  # {"breakfast":"08:30",...}
+
+    people_enabled = Column(Boolean, nullable=False, default=True)
+
+    # {"label": "https://.../basic.ics", ...} - configurable via chat, no redeploy needed.
+    gcal_ics_urls_json = Column(Text, nullable=False, default="{}")
+
+    todoist_inbox_project_id = Column(String, nullable=True)
+
+    escalation_enabled = Column(Boolean, nullable=False, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    # When user runs EVENTS REFRESH, we flip this and the scheduler will act within 60s
-    needs_reschedule = Column(Boolean, default=False, nullable=False)
 
     people = relationship("Person", back_populates="user", cascade="all, delete-orphan")
 
 
+class DailyLog(Base):
+    """
+    One row per user per local day. Tracks whether the day was "engaged" for
+    streak purposes, and which Todoist task ids were picked/completed that day.
+    """
+    __tablename__ = "daily_log"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    day = Column(Date, nullable=False)
+
+    morning_prompted_at = Column(DateTime, nullable=True)
+    morning_responded_at = Column(DateTime, nullable=True)
+
+    planned_task_ids_json = Column(Text, nullable=False, default="[]")
+    completed_task_ids_json = Column(Text, nullable=False, default="[]")
+
+    midday_prompted_at = Column(DateTime, nullable=True)
+
+    evening_prompted_at = Column(DateTime, nullable=True)
+    evening_responded_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("user_id", "day", name="uq_daily_log"),)
+
+
+class PendingNudge(Base):
+    """
+    Tracks a sent prompt for dedupe + escalation (re-ping if ignored).
+    kind: 'morning' | 'midday' | 'evening' | 'meal' | 'person'
+    ref:  '' for daily prompts, meal name, or person id (as string)
+    """
+    __tablename__ = "pending_nudges"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    day = Column(Date, nullable=False)
+    kind = Column(String, nullable=False)
+    ref = Column(String, nullable=False, default="")
+
+    first_sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    escalation_count = Column(Integer, nullable=False, default=0)
+
+    responded_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("user_id", "day", "kind", "ref", name="uq_pending_nudge"),)
+
+
 class Person(Base):
+    """
+    A grounded contact: not just a countdown timer, but running notes on who
+    they are / what you know, so a reminder actually gives you context.
+    """
     __tablename__ = "people"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     name = Column(String, nullable=False)
-    priority = Column(Integer, nullable=False)  # 1..10
-    note = Column(String, nullable=False)      # one-line note
-
-    # day tracking
-    start_day    = Column(Date, nullable=True)    # local date when tracking started/reset
-    base_days    = Column(Integer, nullable=True) # reach out every N days
-    last_contact = Column(Date, nullable=True)    # date of most recent contact
+    context = Column(Text, nullable=False, default="")  # freeform, appended over time
+    cadence_days = Column(Integer, nullable=True)  # reach out every N days; null = no reminder
+    last_contact = Column(Date, nullable=True)
+    snoozed_until = Column(Date, nullable=True)  # "remind me later" without falsely marking as contacted
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -56,90 +120,21 @@ class Person(Base):
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_people_user_name"),)
 
 
-class DailyEventIndex(Base):
-    __tablename__ = "daily_event_index"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    day = Column(Date, nullable=False)                 # local date
-    event_number = Column(Integer, nullable=False)     # 1..N
-    google_event_id = Column(String, nullable=False)
-
-    title = Column(String, nullable=False)
-    start_dt = Column(DateTime, nullable=False)        # UTC (naive or aware; formatter handles both)
-    end_dt = Column(DateTime, nullable=False)
-
-    last_refresh_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint("user_id", "day", "event_number", name="uq_eventnum"),
-        UniqueConstraint("user_id", "day", "google_event_id", name="uq_eventid"),
-    )
-
-
-class EventDone(Base):
-    __tablename__ = "event_done"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    day = Column(Date, nullable=False)
-    google_event_id = Column(String, nullable=False)
-    done_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (UniqueConstraint("user_id", "day", "google_event_id", name="uq_done"),)
-
-
-class TodoCache(Base):
-    __tablename__ = "todo_cache"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    text = Column(String, nullable=False)
-    is_done = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-
-class Note(Base):
-    """
-    Free-form notes you send during the day (anything not recognized as a command).
-    """
-    __tablename__ = "notes"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    day = Column(Date, nullable=False)                  # local day at time of message
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    text = Column(Text, nullable=False)
-
-
-class Checkin(Base):
-    """
-    A prompt we sent ("How's it going? Send pic.") and the response (photo/text).
-    kind = 'event' or 'meal'
-    ref  = event google_event_id OR meal label ('breakfast','fruit','lunch','dinner')
-    """
-    __tablename__ = "checkins"
+class MealLog(Base):
+    __tablename__ = "meal_log"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     day = Column(Date, nullable=False)
-    kind = Column(String, nullable=False)               # 'event' | 'meal'
-    ref = Column(String, nullable=False)                # event_id or meal label
-
-    prompted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    # response
-    responded_at = Column(DateTime, nullable=True)
-    response_text = Column(Text, nullable=True)
+    meal = Column(String, nullable=False)  # e.g. "breakfast"
+    status = Column(String, nullable=False, default="logged")  # 'logged' | 'skipped'
+    note = Column(Text, nullable=True)
     photo_file_id = Column(String, nullable=True)
 
-    __table_args__ = (
-        UniqueConstraint("user_id", "day", "kind", "ref", name="uq_checkin"),
-    )
+    logged_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("user_id", "day", "meal", name="uq_meal_log"),)
 
 
 def init_db() -> None:

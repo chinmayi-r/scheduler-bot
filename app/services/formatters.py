@@ -3,87 +3,24 @@ from __future__ import annotations
 from datetime import date, datetime
 import pytz
 
-from ..db import Person, DailyEventIndex
-from ..services.timeutil import today_in_tz
-from ..services.todoist import TodoistTask
+from .gcal import CalEvent
+from .todoist import TodoistTask
 
 
-# ── People ────────────────────────────────────────────────────────────────────
-
-def _person_contact_status(p: Person, tz_name: str) -> dict | None:
-    """
-    Returns contact status if base_days is set, else None.
-    overdue_by > 0  → overdue by that many days
-    overdue_by == 0 → due today
-    overdue_by < 0  → days remaining until due
-    """
-    if p.base_days is None:
-        return None
-    today = today_in_tz(tz_name)
-    ref = p.last_contact or p.start_day
-    if ref is None:
-        return None
-    days_since = (today - ref).days
-    overdue_by = days_since - int(p.base_days)
-    return {"days_since": days_since, "overdue_by": overdue_by}
-
-
-def _person_is_due(p: Person, tz_name: str) -> bool:
-    status = _person_contact_status(p, tz_name)
-    return status is not None and status["overdue_by"] >= 0
-
-
-def format_people(people: list[Person], tz_name: str, due_only: bool = False) -> str:
-    if not people:
-        return "No people saved."
-
-    people_sorted = sorted(people, key=lambda p: (-p.priority, p.name.lower()))
-
-    if due_only:
-        people_sorted = [p for p in people_sorted if _person_is_due(p, tz_name)]
-        if not people_sorted:
-            return "No one due for contact today. ✅"
-
-    lines = []
-    for i, p in enumerate(people_sorted, start=1):
-        status = _person_contact_status(p, tz_name)
-        if status is not None:
-            ob = status["overdue_by"]
-            if ob > 0:
-                contact_txt = f" ⚠️ {ob}d overdue"
-            elif ob == 0:
-                contact_txt = " — due today"
-            else:
-                contact_txt = f" — in {-ob}d"
-        else:
-            contact_txt = ""
-        note_txt = f" — {p.note}" if p.note else ""
-        lines.append(f"{i}) (P{p.priority}) {p.name}{contact_txt}{note_txt}")
-
-    return "\n".join(lines)
-
-
-# ── Events ────────────────────────────────────────────────────────────────────
-
-def format_events(events: list[DailyEventIndex], tz_name: str = "UTC") -> str:
+def format_events(events: list[CalEvent], tz_name: str = "UTC") -> str:
     if not events:
-        return "No timed events found for today."
+        return "Nothing on the calendar today."
 
     tz = pytz.timezone(tz_name)
     lines = []
-    for e in sorted(events, key=lambda e: e.event_number):
-        start = e.start_dt if e.start_dt.tzinfo else pytz.utc.localize(e.start_dt)
-        end   = e.end_dt   if e.end_dt.tzinfo   else pytz.utc.localize(e.end_dt)
-        s = start.astimezone(tz).strftime("%H:%M")
-        en = end.astimezone(tz).strftime("%H:%M")
-        lines.append(f"{e.event_number}) {s}-{en} {e.title}")
-
+    for i, e in enumerate(sorted(events, key=lambda e: e.start_utc), start=1):
+        s = e.start_utc.astimezone(tz).strftime("%H:%M")
+        en = e.end_utc.astimezone(tz).strftime("%H:%M")
+        lines.append(f"{i}) {s}-{en} {e.title}")
     return "\n".join(lines)
 
 
-# ── Todos ─────────────────────────────────────────────────────────────────────
-
-def format_todoist_tasks_numbered(tasks: list[TodoistTask], tz_name: str = "UTC") -> str:
+def format_tasks_numbered(tasks: list[TodoistTask], tz_name: str = "UTC") -> str:
     if not tasks:
         return "No active tasks."
 

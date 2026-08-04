@@ -9,6 +9,7 @@ from .. import config  # app/config.py load_dotenv() runs there
 
 
 TODOIST_API_BASE = "https://api.todoist.com/api/v1"
+INBOX_PROJECT_NAME = "Inbox"
 
 
 @dataclass
@@ -40,7 +41,7 @@ def _clean_token(tok: str) -> str:
 def _token() -> str:
     tok = _clean_token(getattr(config, "TODOIST_API_TOKEN", ""))
     if not tok:
-        raise TodoistError("TODOIST_API_TOKEN is not set (or not loaded). Check .env and config.py load_dotenv().")
+        raise TodoistError("TODOIST_API_TOKEN is not set. Add it in your deploy env vars.")
     return tok
 
 
@@ -98,7 +99,7 @@ def list_active_tasks(*, project_id: Optional[str] = None, limit: int = 200) -> 
     """
     v1 GET /api/v1/tasks returns:
       { "results": [...], "next_cursor": "..." }
-    Cursor-based pagination. :contentReference[oaicite:1]{index=1}
+    Cursor-based pagination.
     """
     if limit <= 0 or limit > 200:
         limit = 200
@@ -141,9 +142,7 @@ def list_active_tasks(*, project_id: Optional[str] = None, limit: int = 200) -> 
 
 
 def close_task(task_id: str) -> None:
-    """
-    v1: POST /api/v1/tasks/{task_id}/close :contentReference[oaicite:2]{index=2}
-    """
+    """v1: POST /api/v1/tasks/{task_id}/close"""
     tid = str(task_id).strip()
     if not tid:
         raise TodoistError("task_id is empty.")
@@ -158,19 +157,44 @@ def list_projects() -> list[TodoistProject]:
     if r.status_code >= 400:
         _raise(r, context="list_projects")
 
+    j = r.json()
+    results = j.get("results", j) if isinstance(j, dict) else j
     out: list[TodoistProject] = []
-    for p in r.json().get("results", r.json()):  # tolerate either shape
+    for p in results:
         out.append(TodoistProject(id=str(p.get("id", "")), name=str(p.get("name", ""))))
     return out
 
 
+def create_project(name: str) -> TodoistProject:
+    r = requests.post(
+        f"{TODOIST_API_BASE}/projects",
+        headers=_headers(),
+        json={"name": name},
+        timeout=25,
+    )
+    if r.status_code >= 400:
+        _raise(r, context="create_project", payload={"name": name})
+    j = r.json()
+    return TodoistProject(id=str(j.get("id", "")), name=str(j.get("name", "")))
+
+
+def get_or_create_inbox_project_id(cached_id: Optional[str]) -> str:
+    """
+    Returns a Todoist project id to use as the capture inbox.
+    Prefers `cached_id` (already validated once). Otherwise looks for a
+    project named "Inbox", creating one if none exists.
+    Caller is responsible for persisting the returned id (User.todoist_inbox_project_id).
+    """
+    if cached_id:
+        return cached_id
+
+    for p in list_projects():
+        if p.name.strip().lower() == INBOX_PROJECT_NAME.lower():
+            return p.id
+
+    created = create_project(INBOX_PROJECT_NAME)
+    return created.id
+
+
 def default_project_id() -> Optional[str]:
-    """
-    Keep using TODOIST_PROJECT_ID if you set it.
-    In v1, project_id can be string IDs (not necessarily numeric). :contentReference[oaicite:3]{index=3}
-    """
-    pid = getattr(config, "TODOIST_PROJECT_ID", None)
-    if pid is None:
-        return None
-    pid = str(pid).strip()
-    return pid or None
+    return None

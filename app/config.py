@@ -1,5 +1,4 @@
 import os
-import json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -9,11 +8,21 @@ load_dotenv(ROOT / ".env")
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///schedulerbot.db")
 DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "America/New_York")
-GCAL_ICS_URLS_JSON = json.loads(os.environ.get("GCAL_ICS_URLS_JSON", "{}"))
+
+# Todoist is the single source of truth for tasks (real app, real GUI —
+# the bot only orchestrates nudges/capture against it, it doesn't own a task table).
 TODOIST_API_TOKEN = os.environ.get("TODOIST_API_TOKEN", "")
-TODOIST_PROJECT_ID = os.environ.get("TODOIST_PROJECT_ID")
-ALLOWED_MISSES_PER_DAY = int(os.environ.get("ALLOWED_MISSES_PER_DAY", "1"))
-MEAL_TIMES_JSON = os.environ.get("MEAL_TIMES_JSON", "").strip()
+
+# Optional bootstrap calendar sources for the first user during onboarding.
+# Per-user calendar URLs are stored in the DB after that (no redeploy needed to change them).
+GCAL_ICS_URLS_JSON_DEFAULT = os.environ.get("GCAL_ICS_URLS_JSON", "")
+
+# Optional: enables voice-note capture (transcribe -> quick-capture task).
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+
 BOT_INSTANCE_LOCK = os.environ.get("BOT_INSTANCE_LOCK", "1")
-STORE_PHOTO_FILE_ID = os.environ.get("STORE_PHOTO_FILE_ID", "1") == "1"
-TEST_SCHEDULE = os.environ.get("TEST_SCHEDULE", "0")
+
+# How many times to re-ping an unanswered prompt before giving up, and how far apart.
+ESCALATION_MAX = int(os.environ.get("ESCALATION_MAX", "3"))
+ESCALATION_MINUTES = [int(x) for x in os.environ.get("ESCALATION_MINUTES", "10,30,60").split(",") if x.strip()]

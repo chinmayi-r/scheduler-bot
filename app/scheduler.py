@@ -1,335 +1,328 @@
 from __future__ import annotations
 
-import os
 import json
-from datetime import datetime, timedelta
-from typing import Dict
+from datetime import datetime, timedelta, time as dtime
 
 import pytz
 from telegram.ext import ContextTypes
 
-from .db import SessionLocal, User, Person, DailyEventIndex, Checkin
-from .config import MEAL_TIMES_JSON, TEST_SCHEDULE, ALLOWED_MISSES_PER_DAY 
-from .services.formatters import format_events, format_people, format_todoist_tasks_numbered
-from .services.todoist import list_active_tasks as todoist_list_tasks, TodoistError, default_project_id
-from .services.streaks import compute_day_status, compute_streak, format_status_line
-from .services.timeutil import today_in_tz
-from .commands import _build_daily_event_index
-
-# chat_id -> dict(label->datetime) used only in TEST mode
-TEST_TRIGGERS: dict[str, dict] = {}
-
-
-# Time helpers
-
-def _utc_now() -> datetime:
-    # naive UTC; we always localize when needed
-    return datetime.utcnow()
+from .config import ESCALATION_MAX, ESCALATION_MINUTES
+from .db import SessionLocal, User, DailyLog, PendingNudge
+from .services.timeutil import today_in_tz, parse_hhmm
+from .services.meals import load_meal_times
+from .services.streaks import get_or_create_log, format_streak_line
+from .services.people import people_due_today, format_person_line
+from .services.todoist import list_active_tasks, TodoistError
+from .services.gcal import fetch_events_for_day_multi_ics
+from .services.formatters import format_events
+from . import keyboards
 
 
-def _now_local(tz_name: str) -> datetime:
-    tz = pytz.timezone(tz_name)
-    return pytz.utc.localize(_utc_now()).astimezone(tz)
+# ── Job naming ────────────────────────────────────────────────────────────────
+
+def _name(user_id: int, kind: str, ref: str = "") -> str:
+    return f"user{user_id}:{kind}:{ref}" if ref else f"user{user_id}:{kind}"
 
 
-def _same_minute(a: datetime, b: datetime) -> bool:
-    return a.strftime("%Y-%m-%d %H:%M") == b.strftime("%Y-%m-%d %H:%M")
+def unschedule_user_jobs(app, user_id: int) -> None:
+    for job in app.job_queue.jobs():
+        if job.name and job.name.startswith(f"user{user_id}:"):
+            job.schedule_removal()
 
 
-async def _send(app, chat_id: str, text: str) -> None:
-    await app.bot.send_message(chat_id=int(chat_id), text=text)
+def schedule_user_jobs(app, user: User) -> None:
+    """Call whenever a user finishes onboarding or changes timezone/times/toggles.
+    Removes all existing jobs for the user and re-adds from current settings —
+    this is what makes changing timezone actually take effect immediately."""
+    unschedule_user_jobs(app, user.id)
 
+    if user.state != "active":
+        return
 
-# Meal times
+    tz = pytz.timezone(user.timezone)
 
-def _load_meal_times() -> Dict[str, str]:
-    """
-    Load MEAL_TIMES_JSON={"breakfast":"08:30","fruit":"12:00","lunch":"14:00","dinner":"19:00"}
-    Returns name->"HH:MM".
-    Robust: defaults if missing/bad JSON.
-    """
-    defaults = {"breakfast": "08:30", "fruit": "12:00", "lunch": "14:00", "dinner": "19:00"}
+    def at(hhmm: str) -> dtime:
+        t = parse_hhmm(hhmm)
+        return dtime(t.hour, t.minute, tzinfo=tz)
 
-    raw = MEAL_TIMES_JSON
-    if not raw:
-        return defaults
+    jq = app.job_queue
+    jq.run_daily(_job_morning, time=at(user.morning_time), name=_name(user.id, "morning"),
+                 data={"user_id": user.id})
+    jq.run_daily(_job_midday, time=at(user.midday_time), name=_name(user.id, "midday"),
+                 data={"user_id": user.id})
+    jq.run_daily(_job_evening, time=at(user.evening_time), name=_name(user.id, "evening"),
+                 data={"user_id": user.id})
 
-    try:
-        d = json.loads(raw)
-        if not isinstance(d, dict):
-            return defaults
-        out = {}
-        for k, v in d.items():
-            kk = str(k).strip().lower()
-            vv = str(v).strip()
-            # Basic HH:MM validation
-            if len(vv) == 5 and vv[2] == ":" and vv[:2].isdigit() and vv[3:].isdigit():
-                out[kk] = vv
-        return out or defaults
-    except Exception:
-        return defaults
-
-
-def _meal_lookup(meal_times: Dict[str, str]) -> Dict[str, str]:
-    """
-    Invert name->HH:MM into HH:MM->name
-    """
-    inv = {}
-    for name, hhmm in meal_times.items():
-        inv[hhmm] = name
-    return inv
-
-
-# Dedupe gate (important)
-
-def _checkin_exists(db, user_id: int, day, kind: str, ref: str) -> bool:
-    return (
-        db.query(Checkin)
-        .filter(Checkin.user_id == user_id, Checkin.day == day, Checkin.kind == kind, Checkin.ref == ref)
-        .one_or_none()
-        is not None
-    )
-
-
-def _mark_checkin(db, user_id: int, day, kind: str, ref: str) -> None:
-    db.add(Checkin(user_id=user_id, day=day, kind=kind, ref=ref, prompted_at=_utc_now()))
-    db.commit()
-
-
-# Daily prompts
-
-async def _maybe_fire_daily_prompts(app, db, u: User, now_local: datetime) -> None:
-    """
-    Fires the 4 main prompts once per day:
-    07:00 morning
-    07:15 events list
-    07:30 running
-    21:00 wind-down
-    Uses Checkin(kind="daily", ref=...) for dedupe.
-    """
-    hhmm = now_local.strftime("%H:%M")
-    day = today_in_tz(u.timezone)
-
-    if hhmm == "07:00":
-        if not _checkin_exists(db, u.id, day, "daily", "morning"):
-            # Only show people due or overdue today
-            people = db.query(Person).filter(Person.user_id == u.id).all()
-            people_msg = format_people(people, u.timezone, due_only=True)
-
+    if user.meals_enabled:
+        for meal, hhmm in load_meal_times(user).items():
             try:
-                tasks = todoist_list_tasks(project_id=default_project_id())
-                todos_msg = format_todoist_tasks_numbered(tasks, tz_name=u.timezone)
-            except TodoistError as e:
-                todos_msg = f"(Todoist error: {e})"
-
-            day = today_in_tz(u.timezone)
-            st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            status_line = format_status_line(st)
-            streak_line = f"🔥 {cur}d streak (best {best})"
-
-            msg = (
-                f"Morning! Set up today’s calendar by 7:15.\n\n"
-                f"{status_line}  {streak_line}\n\n"
-                f"Todos:\n{todos_msg}\n\n"
-                f"People due:\n{people_msg}"
-            )
-            await _send(app, u.telegram_chat_id, msg)
-            _mark_checkin(db, u.id, day, "daily", "morning")
-
-    elif hhmm == "07:15":
-        if not _checkin_exists(db, u.id, day, "daily", "events_list"):
-            _build_daily_event_index(u)
-            events = (
-                db.query(DailyEventIndex)
-                .filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day)
-                .all()
-            )
-            has_run = any("run" in ev.title.lower() for ev in events)
-            if not events:
-                msg = (
-                    "⚠️ Nothing on your calendar — your morning is unprotected.\n\n"
-                    "No run blocked either. Last chance to add one before 7:30."
-                )
-            elif not has_run:
-                msg = (
-                    "Today’s events:\n" + format_events(events, u.timezone) +
-                    "\n\n⚠️ No run on calendar — add one now if you’re going at 7:30."
-                )
-            else:
-                msg = "Today’s events:\n" + format_events(events, u.timezone)
-            await _send(app, u.telegram_chat_id, msg)
-            _mark_checkin(db, u.id, day, "daily", "events_list")
-
-    elif hhmm == "07:30":
-        if not _checkin_exists(db, u.id, day, "daily", "run"):
-            events = (
-                db.query(DailyEventIndex)
-                .filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day)
-                .all()
-            )
-            has_run = any("run" in ev.title.lower() for ev in events)
-            if has_run:
-                msg = "Running time! Shoes on. Reply when you’re back."
-            else:
-                msg = "Running time — nothing on calendar, but you know you should. Shoes on. Reply when back."
-            await _send(app, u.telegram_chat_id, msg)
-            _mark_checkin(db, u.id, day, "daily", "run")
-
-    elif hhmm == "21:00":
-        if not _checkin_exists(db, u.id, day, "daily", "winddown"):
-            day = today_in_tz(u.timezone)
-            st = compute_day_status(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            cur, best = compute_streak(db, u, day, allowed_misses=ALLOWED_MISSES_PER_DAY)
-            status_line = format_status_line(st)
-            streak_line = f"🔥 {cur}d streak (best {best})"
-            await _send(
-                app,
-                u.telegram_chat_id,
-                f"Wind-down: 2 min brain dump + pick tomorrow’s TODOs.\n\n"
-                f"{status_line}  {streak_line}"
-            )
-            _mark_checkin(db, u.id, day, "daily", "winddown")
+                t = at(hhmm)
+            except Exception:
+                continue
+            jq.run_daily(_job_meal, time=t, name=_name(user.id, "meal", meal),
+                         data={"user_id": user.id, "meal": meal})
 
 
-# Meal prompts
-
-async def _maybe_fire_meal_checkins(app, db, u: User, now_local: datetime, meal_by_time: Dict[str, str]) -> None:
-    hhmm = now_local.strftime("%H:%M")
-    if hhmm not in meal_by_time:
-        return
-
-    day = today_in_tz(u.timezone)
-    meal = meal_by_time[hhmm]  # e.g. "breakfast"
-
-    if _checkin_exists(db, u.id, day, "meal", meal):
-        return
-
-    await _send(app, u.telegram_chat_id, f"{meal.capitalize()} check-in. What did you have? Send a pic if you want.")
-    _mark_checkin(db, u.id, day, "meal", meal)
+def schedule_all_active_users(app) -> None:
+    db = SessionLocal()
+    try:
+        for u in db.query(User).filter(User.state == "active").all():
+            schedule_user_jobs(app, u)
+    finally:
+        db.close()
 
 
-# Event photo check-ins (start + 5 min)
+# ── Escalation (re-ping if ignored) ──────────────────────────────────────────
 
-async def _maybe_fire_event_checkins(app, db, u: User, now_local: datetime) -> None:
-    day = today_in_tz(u.timezone)
-
-    events = (
-        db.query(DailyEventIndex)
-        .filter(DailyEventIndex.user_id == u.id, DailyEventIndex.day == day)
-        .all()
+def _get_or_make_nudge(db, user: User, day, kind: str, ref: str = "") -> tuple[PendingNudge, bool]:
+    """Returns (nudge, is_new). is_new=False means this was already sent today (dedupe)."""
+    row = (
+        db.query(PendingNudge)
+        .filter(PendingNudge.user_id == user.id, PendingNudge.day == day,
+                PendingNudge.kind == kind, PendingNudge.ref == ref)
+        .one_or_none()
     )
-    if not events:
+    if row:
+        return row, False
+    row = PendingNudge(user_id=user.id, day=day, kind=kind, ref=ref)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row, True
+
+
+def _schedule_escalation(app, user_id: int, kind: str, ref: str, day_iso: str) -> None:
+    if not ESCALATION_MINUTES:
         return
-
-    tz = pytz.timezone(u.timezone)
-
-    for ev in events:
-        start = ev.start_dt
-        if start.tzinfo is None:
-            start_utc = pytz.utc.localize(start)
-        else:
-            start_utc = start.astimezone(pytz.utc)
-
-        fire_local = start_utc.astimezone(tz) + timedelta(minutes=5)
-
-        if not _same_minute(now_local, fire_local):
-            continue
-
-        # Dedupe per event occurrence
-        ref = ev.google_event_id
-        if _checkin_exists(db, u.id, day, "event", ref):
-            continue
-
-        await _send(
-            app,
-            u.telegram_chat_id,
-            f"Check-in: {ev.event_number}) {ev.title}\nHow’s it going? Send a pic."
-        )
-        _mark_checkin(db, u.id, day, "event", ref)
+    app.job_queue.run_once(
+        _job_escalate,
+        when=timedelta(minutes=ESCALATION_MINUTES[0]),
+        name=_name(user_id, "escalate", f"{kind}:{ref}"),
+        data={"user_id": user_id, "kind": kind, "ref": ref, "day": day_iso, "step": 0},
+    )
 
 
-# TEST mode (fast-fire)
-
-async def _maybe_fire_test_prompts(app, db, u: User, now_local: datetime) -> None:
-    """
-    Fires the 4 daily prompts within the next minutes, once.
-    Uses in-memory TEST_TRIGGERS only.
-    """
-    key = u.telegram_chat_id
-    if key not in TEST_TRIGGERS:
-        TEST_TRIGGERS[key] = {
-            "07:00": now_local + timedelta(minutes=1),
-            "07:15": now_local + timedelta(minutes=2),
-            "07:30": now_local + timedelta(minutes=3),
-            "21:00": now_local + timedelta(minutes=4),
-            "_fired": set(),
-        }
-
-    triggers = TEST_TRIGGERS[key]
-    fired = triggers["_fired"]
-
-    def should_fire(label: str) -> bool:
-        t = triggers[label]
-        return label not in fired and _same_minute(now_local, t)
-
-    if should_fire("07:00"):
-        fired.add("07:00")
-        await _send(app, u.telegram_chat_id, "TEST 07:00 (morning)")
-
-    if should_fire("07:15"):
-        fired.add("07:15")
-        await _send(app, u.telegram_chat_id, "TEST 07:15 (events list)")
-
-    if should_fire("07:30"):
-        fired.add("07:30")
-        await _send(app, u.telegram_chat_id, "TEST 07:30 (run)")
-
-    if should_fire("21:00"):
-        fired.add("21:00")
-        await _send(app, u.telegram_chat_id, "TEST 21:00 (wind-down)")
-
-
-# Entry points
-
-def start_scheduler(app) -> None:
-    app.job_queue.run_repeating(tick, interval=60, first=1)
-
-
-async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
-    app = context.application
-    test_mode = (TEST_SCHEDULE == "1")
-
-    meal_times = _load_meal_times()
-    meal_by_time = _meal_lookup(meal_times)
+async def _job_escalate(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data
+    user_id, kind, ref, day_iso, step = data["user_id"], data["kind"], data["ref"], data["day"], data["step"]
 
     db = SessionLocal()
     try:
-        users = db.query(User).all()
+        user = db.get(User, user_id)
+        if not user or not user.escalation_enabled:
+            return
 
-        for u in users:
-            now_local = _now_local(u.timezone)
+        from datetime import date as _date
+        day = _date.fromisoformat(day_iso)
+        row = (
+            db.query(PendingNudge)
+            .filter(PendingNudge.user_id == user_id, PendingNudge.day == day,
+                    PendingNudge.kind == kind, PendingNudge.ref == ref)
+            .one_or_none()
+        )
+        if not row or row.responded_at is not None:
+            return  # already handled, stop nagging
 
-            # TEST MODE
-            if test_mode:
-                await _maybe_fire_test_prompts(app, db, u, now_local)
-                # still allow meal + event checkins in test mode if you want;
-                # comment these out if you only want the 4 test pings
-                await _maybe_fire_meal_checkins(app, db, u, now_local, meal_by_time)
-                await _maybe_fire_event_checkins(app, db, u, now_local)
-                continue
+        if row.escalation_count >= ESCALATION_MAX:
+            return
 
-            # NORMAL MODE
+        labels = {
+            "morning": "Still haven't picked today's plan — even one small thing counts.",
+            "evening": "Still waiting on your wind-down check-in — takes 10 seconds.",
+            "meal": f"Still haven't logged {ref} — even 'skip' is fine, just tap it.",
+        }
+        text = "⏰ " + labels.get(kind, "Still waiting on you for this one.")
 
-            # If refresh requested (set by commands), rebuild index now (and clear flag).
-            if getattr(u, "needs_reschedule", False):
-                _build_daily_event_index(u)
-                u.needs_reschedule = False
-                db.commit()
+        await context.bot.send_message(chat_id=int(user.telegram_chat_id), text=text)
 
-            await _maybe_fire_daily_prompts(app, db, u, now_local)
-            await _maybe_fire_meal_checkins(app, db, u, now_local, meal_by_time)
-            await _maybe_fire_event_checkins(app, db, u, now_local)
+        row.escalation_count += 1
+        row.last_sent_at = datetime.utcnow()
+        db.commit()
 
+        next_step = step + 1
+        if next_step < len(ESCALATION_MINUTES):
+            context.job_queue.run_once(
+                _job_escalate,
+                when=timedelta(minutes=ESCALATION_MINUTES[next_step]),
+                name=_name(user_id, "escalate", f"{kind}:{ref}"),
+                data={"user_id": user_id, "kind": kind, "ref": ref, "day": day_iso, "step": next_step},
+            )
+    finally:
+        db.close()
+
+
+def mark_nudge_responded(db, user: User, day, kind: str, ref: str = "") -> None:
+    row = (
+        db.query(PendingNudge)
+        .filter(PendingNudge.user_id == user.id, PendingNudge.day == day,
+                PendingNudge.kind == kind, PendingNudge.ref == ref)
+        .one_or_none()
+    )
+    if row and row.responded_at is None:
+        row.responded_at = datetime.utcnow()
+        db.commit()
+
+
+# ── Daily jobs ────────────────────────────────────────────────────────────────
+
+async def _job_morning(context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = context.job.data["user_id"]
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or user.state != "active":
+            return
+        day = today_in_tz(user.timezone)
+
+        _, is_new = _get_or_make_nudge(db, user, day, "morning")
+        if not is_new:
+            return
+
+        log = get_or_create_log(db, user, day)
+        log.morning_prompted_at = datetime.utcnow()
+        db.commit()
+
+        try:
+            tasks = list_active_tasks()
+        except TodoistError as e:
+            tasks = []
+            todoist_note = f"\n\n(Todoist error: {e})"
+        else:
+            todoist_note = ""
+
+        due_people = people_due_today(db, user, user.timezone)
+        people_txt = ""
+        if user.people_enabled and due_people:
+            today = today_in_tz(user.timezone)
+            lines = "\n".join(f"- {format_person_line(p, today)}" for p in due_people)
+            people_txt = f"\n\nPeople due today:\n{lines}"
+
+        streak_line = format_streak_line(db, user, day)
+
+        text = (
+            f"Morning. {streak_line}\n\n"
+            f"What's the plan for today? Tap 1-5 things below, then Confirm — "
+            f"or Skip if today's not a planning day.{todoist_note}{people_txt}"
+        )
+
+        if not tasks:
+            text += "\n\n(No active Todoist tasks found — add one by just texting me anything.)"
+
+        msg = await context.bot.send_message(
+            chat_id=int(user.telegram_chat_id), text=text,
+            reply_markup=keyboards.morning_plan_keyboard(tasks, set()),
+        )
+        context.bot_data.setdefault("plan_selection", {})[user.id] = {
+            "tasks": {t.id: t.content for t in tasks},
+            "selected": set(),
+            "message_id": msg.message_id,
+        }
+
+        _schedule_escalation(context.application, user.id, "morning", "", day.isoformat())
+    finally:
+        db.close()
+
+
+async def _job_midday(context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = context.job.data["user_id"]
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or user.state != "active":
+            return
+        day = today_in_tz(user.timezone)
+
+        log = get_or_create_log(db, user, day)
+        if log.midday_prompted_at is not None:
+            return
+        log.midday_prompted_at = datetime.utcnow()
+        db.commit()
+
+        planned_ids = json.loads(log.planned_task_ids_json or "[]")
+        completed_ids = set(json.loads(log.completed_task_ids_json or "[]"))
+        remaining_ids = [t for t in planned_ids if t not in completed_ids]
+
+        if not remaining_ids:
+            if planned_ids:
+                text = "Midday check-in: today's picks are all done. 🎉 Anything else on your mind? Just text me."
+            else:
+                text = "Midday check-in: you haven't picked anything for today yet. Still exists — want to grab 1 thing now?"
+            await context.bot.send_message(chat_id=int(user.telegram_chat_id), text=text)
+            return
+
+        try:
+            all_tasks = {t.id: t for t in list_active_tasks()}
+        except TodoistError:
+            all_tasks = {}
+
+        remaining_tasks = [all_tasks[i] for i in remaining_ids if i in all_tasks]
+        lines = "\n".join(f"- {t.content}" for t in remaining_tasks) or "(details unavailable)"
+        text = f"Midday check-in — these still exist:\n{lines}"
+
+        await context.bot.send_message(
+            chat_id=int(user.telegram_chat_id), text=text,
+            reply_markup=keyboards.tasks_list_keyboard(remaining_tasks) if remaining_tasks else None,
+        )
+    finally:
+        db.close()
+
+
+async def _job_evening(context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = context.job.data["user_id"]
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or user.state != "active":
+            return
+        day = today_in_tz(user.timezone)
+
+        _, is_new = _get_or_make_nudge(db, user, day, "evening")
+        if not is_new:
+            return
+
+        log = get_or_create_log(db, user, day)
+        log.evening_prompted_at = datetime.utcnow()
+        db.commit()
+
+        planned_ids = json.loads(log.planned_task_ids_json or "[]")
+        completed_ids = json.loads(log.completed_task_ids_json or "[]")
+        streak_line = format_streak_line(db, user, day)
+
+        text = (
+            f"Wind-down. {len(completed_ids)}/{len(planned_ids)} planned things done today.\n"
+            f"{streak_line}\n\n"
+            f"Anything for tomorrow? Just text it to me — it'll be captured. "
+            f"Or tap below and call it a day."
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ That's today", callback_data="eveningdone")]])
+        await context.bot.send_message(chat_id=int(user.telegram_chat_id), text=text, reply_markup=kb)
+
+        _schedule_escalation(context.application, user.id, "evening", "", day.isoformat())
+    finally:
+        db.close()
+
+
+async def _job_meal(context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = context.job.data["user_id"]
+    meal = context.job.data["meal"]
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or user.state != "active" or not user.meals_enabled:
+            return
+        day = today_in_tz(user.timezone)
+
+        _, is_new = _get_or_make_nudge(db, user, day, "meal", meal)
+        if not is_new:
+            return
+
+        text = f"{meal.capitalize()} check-in. Eat something? Send a pic if you want, or just tap below."
+        await context.bot.send_message(
+            chat_id=int(user.telegram_chat_id), text=text,
+            reply_markup=keyboards.meal_keyboard(meal),
+        )
+
+        _schedule_escalation(context.application, user.id, "meal", meal, day.isoformat())
     finally:
         db.close()
