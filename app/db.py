@@ -120,48 +120,6 @@ class Person(Base):
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_people_user_name"),)
 
 
-class InboxSuggestion(Base):
-    """
-    A task suggested by something other than you typing it -- currently Pocket's
-    extracted action items. Held for one-tap approval rather than auto-created,
-    so an hour of conversation can't quietly flood your real task list.
-    """
-    __tablename__ = "inbox_suggestions"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    text = Column(Text, nullable=False)
-    source = Column(String, nullable=False, default="pocket")
-    external_ref = Column(String, nullable=True)  # recording/action-item id, for dedupe
-    status = Column(String, nullable=False, default="pending")  # pending|added|dismissed
-
-    # Links the created Todoist task back to Pocket, so finishing it here can
-    # close the action item over there instead of leaving it open forever.
-    todoist_task_id = Column(String, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-
-class WebhookLog(Base):
-    """
-    Raw record of the last few inbound webhook deliveries. Pocket's payload
-    format isn't publicly documented, so without this a shape mismatch would
-    look identical to "Pocket never sent anything" -- and you'd have no way to
-    tell which. /pocketdebug reads this.
-    """
-    __tablename__ = "webhook_log"
-
-    id = Column(Integer, primary_key=True)
-    source = Column(String, nullable=False, default="pocket")
-    received_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    ok = Column(Boolean, nullable=False, default=True)
-    note = Column(String, nullable=False, default="")
-    items_found = Column(Integer, nullable=False, default=0)
-    raw = Column(Text, nullable=False, default="")
-
-
 class MealLog(Base):
     __tablename__ = "meal_log"
 
@@ -182,7 +140,10 @@ class MealLog(Base):
 def init_db() -> None:
     """Creates missing tables, migrating any pre-redesign schema first so an
     existing deployment's database doesn't crash on the new columns."""
-    from .migrate import detect_legacy_tables, stash_legacy_tables, restore_rescued_rows
+    from .migrate import (
+        detect_legacy_tables, stash_legacy_tables, restore_rescued_rows,
+        repair_stuck_migrated_users,
+    )
 
     legacy = detect_legacy_tables(engine)
     rescued = stash_legacy_tables(engine, legacy) if legacy else {}
@@ -196,3 +157,7 @@ def init_db() -> None:
             f"{counts['users']} user(s), {counts['people']} person/people carried over. "
             f"Old tables kept as *_legacy_backup."
         )
+
+    repaired = repair_stuck_migrated_users(engine)
+    if repaired:
+        print(f"Reactivated {repaired} user(s) stranded mid-onboarding by an earlier migration.")

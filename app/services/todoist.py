@@ -104,6 +104,12 @@ def list_active_tasks(*, project_id: Optional[str] = None, limit: int = 200) -> 
     if limit <= 0 or limit > 200:
         limit = 200
 
+    # Scope to the configured project by default, so setting TODOIST_PROJECT_ID
+    # narrows what the bot shows as well as where it writes -- otherwise the
+    # daily prompts would list tasks from every project you own.
+    if project_id is None:
+        project_id = getattr(config, "TODOIST_PROJECT_ID", "") or None
+
     params: dict[str, Any] = {"limit": limit}
     if project_id:
         params["project_id"] = str(project_id).strip()

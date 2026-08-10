@@ -73,22 +73,43 @@ def stash_legacy_tables(engine, tables: list[str]) -> dict[str, list[dict]]:
     return rescued
 
 
+def repair_stuck_migrated_users(engine) -> int:
+    """An earlier version of this migration parked existing users in onboarding,
+    which stopped their daily jobs from being scheduled at all. Anyone who was
+    migrated (so has a row in the legacy backup) but is still sitting in an
+    onboarding state gets activated, since they were already a working user."""
+    insp = inspect(engine)
+    if "users_legacy_backup" not in set(insp.get_table_names()):
+        return 0
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE users SET state = 'active' "
+                "WHERE state LIKE 'onb_%' AND telegram_chat_id IN "
+                "(SELECT telegram_chat_id FROM users_legacy_backup)"
+            )
+        )
+        return result.rowcount or 0
+
+
 def restore_rescued_rows(engine, rescued: dict[str, list[dict]]) -> dict[str, int]:
     """Insert rescued rows into the freshly-created new-schema tables."""
     counts = {"users": 0, "people": 0}
 
     with engine.begin() as conn:
         for row in rescued.get("users", []):
-            # Legacy users never went through the new onboarding (morning/evening
-            # times, meals, people toggles didn't exist), so send them through it.
-            # Their old timezone is preserved as the starting value.
+            # Migrated users come back ACTIVE with sensible defaults, not parked
+            # in onboarding. Parking them meant no jobs were scheduled, so the
+            # daily prompts silently stopped for an existing, working install --
+            # an upgrade must never leave you worse off than before it ran.
             conn.execute(
                 text(
                     "INSERT INTO users (id, telegram_chat_id, state, timezone, "
                     "morning_time, midday_time, evening_time, meals_enabled, "
                     "meal_times_json, people_enabled, gcal_ics_urls_json, "
                     "escalation_enabled, created_at) "
-                    "VALUES (:id, :chat_id, 'onb_tz', :tz, '08:00', '13:00', '21:00', "
+                    "VALUES (:id, :chat_id, 'active', :tz, '08:00', '13:00', '21:00', "
                     "1, '{}', 1, '{}', 1, :created_at)"
                 ),
                 {

@@ -23,6 +23,31 @@ def save_meal_times(db, user: User, meal_times: dict[str, str]) -> None:
     db.commit()
 
 
+def parse_meal_times(raw: str) -> dict[str, str]:
+    """Accepts 'breakfast 08:30, lunch 13:00, dinner 19:00' (commas or newlines).
+    Raises ValueError with a usable message rather than silently dropping entries."""
+    out: dict[str, str] = {}
+    for chunk in raw.replace("\n", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.replace("=", " ").replace(":", ":").split()
+        if len(parts) < 2:
+            raise ValueError(f"Couldn't read '{chunk}' — use: name HH:MM")
+        name, hhmm = parts[0].strip().lower(), parts[-1].strip()
+        try:
+            hh, mm = hhmm.split(":")
+            h, m = int(hh), int(mm)
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+        except Exception:
+            raise ValueError(f"'{hhmm}' isn't a 24h time like 08:30")
+        out[name] = f"{h:02d}:{m:02d}"
+    if not out:
+        raise ValueError("No meals found.")
+    return out
+
+
 def log_meal(db, user: User, day: date, meal: str, status: str, note: str | None = None,
              photo_file_id: str | None = None) -> MealLog:
     row = (

@@ -6,7 +6,7 @@ from telegram import (
 )
 
 from .services.todoist import TodoistTask
-from .db import Person, InboxSuggestion
+from .db import Person
 
 
 # ── Persistent keyboard ───────────────────────────────────────────────────────
@@ -185,19 +185,6 @@ def people_due_keyboard(people: list[Person]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-# ── Inbox suggestions (Pocket) ────────────────────────────────────────────────
-
-def suggestions_keyboard(rows: list[InboxSuggestion]) -> InlineKeyboardMarkup:
-    kb = [[InlineKeyboardButton("➕ Add all", callback_data="suggall:add"),
-           InlineKeyboardButton("🗑️ Dismiss all", callback_data="suggall:drop")]]
-    for r in rows[:8]:
-        kb.append([
-            InlineKeyboardButton(f"➕ {r.text[:32]}", callback_data=f"sugg:{r.id}:add"),
-            InlineKeyboardButton("🗑️", callback_data=f"sugg:{r.id}:drop"),
-        ])
-    return InlineKeyboardMarkup(kb)
-
-
 # ── Help / more ───────────────────────────────────────────────────────────────
 
 def help_keyboard() -> InlineKeyboardMarkup:
@@ -214,8 +201,7 @@ def more_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 People", callback_data="more:people"),
          InlineKeyboardButton("🍽️ Meals", callback_data="more:meals")],
-        [InlineKeyboardButton("🔥 Streak", callback_data="more:streak"),
-         InlineKeyboardButton("📥 Inbox", callback_data="more:inbox")],
+        [InlineKeyboardButton("🔥 Streak", callback_data="more:streak")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="more:settings"),
          InlineKeyboardButton("❓ Help", callback_data="more:help")],
     ])

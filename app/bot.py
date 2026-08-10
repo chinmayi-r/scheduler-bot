@@ -15,9 +15,9 @@ from telegram.ext import (
 
 from .config import (
     TELEGRAM_BOT_TOKEN, BOT_INSTANCE_LOCK, GCAL_ICS_URLS_JSON_DEFAULT,
-    POCKET_WEBHOOK_SECRET,
+    STORE_PHOTO_FILE_ID,
 )
-from .db import init_db, SessionLocal, User, DailyLog, Person, InboxSuggestion
+from .db import init_db, SessionLocal, User, DailyLog, Person
 from . import keyboards
 from .keyboards import (
     BTN_TODAY, BTN_TASKS, BTN_CAPTURE, BTN_BREAKDOWN, BTN_MORE, PERSISTENT_BUTTONS,
@@ -31,8 +31,6 @@ from .services import people as people_svc
 from .services import meals as meals_svc
 from .services import voice as voice_svc
 from .services import llm as llm_svc
-from .services import pocket as pocket_svc
-from .services import pocket_sync
 from .services.streaks import get_or_create_log, format_streak_line
 from .scheduler import schedule_user_jobs, schedule_all_active_users, mark_nudge_responded
 
@@ -158,20 +156,11 @@ def _streak_view(db, user: User) -> tuple[str, None]:
     )
 
 
-def _inbox_view(db, user: User) -> tuple[str, InlineKeyboardMarkup | None]:
-    rows = (
-        db.query(InboxSuggestion)
-        .filter(InboxSuggestion.user_id == user.id, InboxSuggestion.status == "pending")
-        .order_by(InboxSuggestion.created_at.desc())
-        .all()
-    )
-    if not rows:
-        if not POCKET_WEBHOOK_SECRET:
-            return ("Inbox is empty.\n\nConnect your Pocket recorder (set POCKET_WEBHOOK_SECRET) "
-                    "and action items from your conversations will land here for one-tap adding."), None
-        return "Inbox is empty — nothing waiting from Pocket.", None
-    listing = "\n".join(f"• {r.text}" for r in rows)
-    return f"📥 {len(rows)} waiting from Pocket:\n{listing}", keyboards.suggestions_keyboard(rows)
+def _meal_times_summary(user: User) -> str:
+    if not user.meals_enabled:
+        return ""
+    times = meals_svc.load_meal_times(user)
+    return " (" + ", ".join(f"{k} {v}" for k, v in times.items()) + ")" if times else ""
 
 
 def _settings_view(db, user: User) -> tuple[str, InlineKeyboardMarkup]:
@@ -181,7 +170,8 @@ def _settings_view(db, user: User) -> tuple[str, InlineKeyboardMarkup]:
         f"🕐 Timezone: {user.timezone} — it's {local} for you right now\n"
         f"🌅 Morning plan: {user.morning_time}\n"
         f"🌆 Wind-down: {user.evening_time}\n"
-        f"🍽️ Meals: {'on' if user.meals_enabled else 'off'}\n"
+        f"🍽️ Meals: {'on' if user.meals_enabled else 'off'}"
+        f"{_meal_times_summary(user)}\n"
         f"👥 People: {'on' if user.people_enabled else 'off'}\n"
         f"⏰ Re-pings when ignored: {'on' if user.escalation_enabled else 'off'}"
     )
@@ -195,7 +185,8 @@ def _settings_view(db, user: User) -> tuple[str, InlineKeyboardMarkup]:
          InlineKeyboardButton(f"👥 People: {'on' if user.people_enabled else 'off'}",
                               callback_data="settings:peopletoggle")],
         [InlineKeyboardButton(f"⏰ Re-pings: {'on' if user.escalation_enabled else 'off'}",
-                              callback_data="settings:esctoggle")],
+                              callback_data="settings:esctoggle"),
+         InlineKeyboardButton("🍽️ Meal times", callback_data="settings:mealtimes")],
     ]
     return text, InlineKeyboardMarkup(rows)
 
@@ -409,98 +400,75 @@ people_cmd = _simple_command(_people_view)
 meals_cmd = _simple_command(_meals_view)
 streak_cmd = _simple_command(_streak_view)
 settings_cmd = _simple_command(_settings_view)
-inbox_cmd = _simple_command(_inbox_view)
 
 
-async def pocketsync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fires a prompt right now. Replaces the old TEST_SCHEDULE env var: waiting
+    until tomorrow morning to find out whether the pings work is not a workable
+    way to check anything."""
     _clear_awaiting(context)
     chat_id = str(update.effective_chat.id)
+    which = (context.args[0].lower() if context.args else "morning")
+
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.telegram_chat_id == chat_id).one_or_none()
         if not user or user.state != "active":
             await update.message.reply_text("Send /start first.")
             return
-        if not pocket_svc.pocket_api_enabled():
+
+        jobs = {"morning": "morning", "midday": "midday", "evening": "evening"}
+        if which not in jobs and which != "meal":
             await update.message.reply_text(
-                "Pocket isn't connected. Set POCKET_API_KEY on Railway "
-                "(Pocket → Settings → Developer → API Keys, starts with pk_)."
+                "Usage: /test morning | midday | evening | meal\n"
+                "Fires that prompt immediately so you can check it works."
             )
             return
 
-        await update.message.reply_text("Checking Pocket…")
-        try:
-            new, total = pocket_sync.pull_action_items(db, user)
-        except pocket_svc.PocketError as e:
-            await update.message.reply_text(f"Couldn't reach Pocket: {e}")
-            return
-
-        if not total:
-            await update.message.reply_text("No open action items in Pocket right now.")
-            return
-        if not new:
-            await update.message.reply_text(
-                f"Found {total} open action item(s) — all already seen. Check /inbox."
-            )
-            return
-        text, markup = _inbox_view(db, user)
-        await update.message.reply_text(f"Pulled {new} new from Pocket.\n\n{text}", reply_markup=markup)
+        # Clear today's dedupe marker, otherwise the job sees it as already sent.
+        from .db import PendingNudge
+        day = today_in_tz(user.timezone)
+        kind = "meal" if which == "meal" else which
+        db.query(PendingNudge).filter(
+            PendingNudge.user_id == user.id, PendingNudge.day == day, PendingNudge.kind == kind
+        ).delete()
+        if which in ("morning", "evening"):
+            log = get_or_create_log(db, user, day)
+            if which == "morning":
+                log.morning_prompted_at = None
+            else:
+                log.evening_prompted_at = None
+        elif which == "midday":
+            log = get_or_create_log(db, user, day)
+            log.midday_prompted_at = None
+        db.commit()
+        user_id = user.id
     finally:
         db.close()
 
+    from . import scheduler as sched
+    runner = {
+        "morning": sched._job_morning,
+        "midday": sched._job_midday,
+        "evening": sched._job_evening,
+        "meal": sched._job_meal,
+    }[which]
 
-async def pocketdebug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows what Pocket actually sent. Without this, 'Pocket sent nothing' and
-    'Pocket sent a shape I don't parse' are indistinguishable."""
-    _clear_awaiting(context)
-    from .db import WebhookLog
-
-    lines = []
-    if pocket_svc.pocket_api_enabled():
+    data = {"user_id": user_id}
+    if which == "meal":
+        db2 = SessionLocal()
         try:
-            info = pocket_svc.account_info()
-            who = info.get("email") or info.get("displayName") or "connected"
-            plan = info.get("plan") or info.get("tier") or "?"
-            lines.append(f"🔑 API key works — {who} (plan: {plan})")
-        except pocket_svc.PocketError as e:
-            lines.append(f"🔑 API key problem: {e}")
-    else:
-        lines.append("🔑 POCKET_API_KEY not set — /pocketsync is unavailable.")
-
-    lines.append(
-        "🪝 Webhook listener: on" if POCKET_WEBHOOK_SECRET
-        else "🪝 Webhook listener: off (POCKET_WEBHOOK_SECRET not set) — pull via /pocketsync still works."
-    )
-
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(WebhookLog)
-            .order_by(WebhookLog.received_at.desc())
-            .limit(3)
-            .all()
-        )
-        if not rows:
-            lines.append(
-                "\nNo webhook deliveries received yet. If you set one up in Pocket, check "
-                "the URL ends in /webhooks/pocket and your Railway service has a public domain."
-            )
-            await update.message.reply_text("\n".join(lines))
+            u2 = db2.get(User, user_id)
+            names = list(meals_svc.load_meal_times(u2))
+        finally:
+            db2.close()
+        if not names:
+            await update.message.reply_text("No meals configured.")
             return
-        lines.append("")
-        await update.message.reply_text("\n".join(lines))
+        data["meal"] = names[0]
 
-        parts = []
-        for row in rows:
-            stamp = row.received_at.strftime("%b %d %H:%M UTC")
-            status = "✅" if row.ok else "❌"
-            body = row.raw if len(row.raw) <= 700 else row.raw[:700] + "…(truncated)"
-            parts.append(
-                f"{status} {stamp}\n{row.note}\nitems found: {row.items_found}\n\n{body}"
-            )
-        await update.message.reply_text("\n\n———\n\n".join(parts))
-    finally:
-        db.close()
+    context.job_queue.run_once(runner, when=0, data=data, name=f"user{user_id}:test:{which}")
+    await update.message.reply_text(f"Firing the {which} prompt now…")
 
 
 async def breakdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -678,7 +646,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             which = data.split(":", 1)[1]
             views = {
                 "people": _people_view, "meals": _meals_view, "streak": _streak_view,
-                "settings": _settings_view, "inbox": _inbox_view,
+                "settings": _settings_view,
             }
             await query.answer()
             if which == "help":
@@ -771,6 +739,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.edit_message_text(text, reply_markup=markup)
             return
 
+        if data == "settings:mealtimes":
+            current = ", ".join(f"{k} {v}" for k, v in meals_svc.load_meal_times(user).items())
+            _set_awaiting(context, "settings_mealtimes")
+            await query.answer()
+            await query.message.reply_text(
+                f"Current: {current}\n\nSend new ones the same way, e.g.\n"
+                f"breakfast 09:00, lunch 14:00, dinner 20:00",
+                reply_markup=keyboards.cancel_only(),
+            )
+            return
+
         if data == "settings:addcal":
             _set_awaiting(context, "settings_cal_custom")
             await query.answer()
@@ -842,11 +821,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             completed.add(task_id)
             log.completed_task_ids_json = json.dumps(list(completed))
             db.commit()
-
-            # If this task came from Pocket, close it there too rather than
-            # leaving a stale open action item behind.
-            closed = pocket_sync.complete_linked_action_item(db, user, task_id)
-            await query.answer("✅ Done — also closed in Pocket" if closed else "✅ Done")
+            await query.answer("✅ Done")
             markup = query.message.reply_markup
             if markup:
                 rows = [
@@ -929,56 +904,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _set_awaiting(context, "people_add_name")
             await query.answer()
             await query.message.reply_text("What's their name?", reply_markup=keyboards.cancel_only())
-            return
-
-        # ── Pocket inbox suggestions ──
-        if data.startswith("sugg:"):
-            _, sid, action = data.split(":", 2)
-            row = db.query(InboxSuggestion).filter(
-                InboxSuggestion.id == int(sid), InboxSuggestion.user_id == user.id
-            ).one_or_none()
-            if not row or row.status != "pending":
-                await query.answer("Already handled")
-                return
-            if action == "add":
-                try:
-                    task = quick_capture(db, user, row.text)
-                except TodoistError as e:
-                    await query.answer(f"Todoist error: {e}", show_alert=True)
-                    return
-                row.status = "added"
-                row.todoist_task_id = task.id
-                await query.answer("Added")
-            else:
-                row.status = "dismissed"
-                await query.answer("Dismissed")
-            db.commit()
-            text, markup = _inbox_view(db, user)
-            await query.edit_message_text(text, reply_markup=markup)
-            return
-
-        if data.startswith("suggall:"):
-            action = data.split(":", 1)[1]
-            rows = db.query(InboxSuggestion).filter(
-                InboxSuggestion.user_id == user.id, InboxSuggestion.status == "pending"
-            ).all()
-            count = 0
-            for row in rows:
-                if action == "add":
-                    try:
-                        task = quick_capture(db, user, row.text)
-                    except TodoistError:
-                        break
-                    row.status = "added"
-                    row.todoist_task_id = task.id
-                else:
-                    row.status = "dismissed"
-                count += 1
-            db.commit()
-            await query.answer(f"{'Added' if action == 'add' else 'Dismissed'} {count}")
-            await query.edit_message_text(
-                f"{'➕ Added' if action == 'add' else '🗑️ Dismissed'} {count} item(s)."
-            )
             return
 
         if data == "eveningdone":
@@ -1095,7 +1020,10 @@ async def _handle_onboarding_text(update, context, db, user: User, text: str) ->
         await _finish_onboarding(db, user, context)
         return
 
-    await update.message.reply_text("Tap one of the buttons above to keep going.")
+    # Never tell someone to tap buttons without showing them: anyone who typed
+    # before /start had no buttons on screen, so this looped forever.
+    await update.message.reply_text("Let's finish setup first — here it is again:")
+    await _send_onboarding_step(chat_id, user, context)
 
 
 async def _handle_awaiting_text(update, context, db, user: User, awaiting: dict, text: str) -> None:
@@ -1128,6 +1056,19 @@ async def _handle_awaiting_text(update, context, db, user: User, awaiting: dict,
         schedule_user_jobs(context.application, user)
         _clear_awaiting(context)
         await update.message.reply_text(f"✅ Set to {hhmm}.")
+        return
+
+    if kind == "settings_mealtimes":
+        try:
+            times = meals_svc.parse_meal_times(text)
+        except ValueError as e:
+            await update.message.reply_text(f"{e}\n\nTry again, or /cancel.")
+            return
+        meals_svc.save_meal_times(db, user, times)
+        schedule_user_jobs(context.application, user)
+        _clear_awaiting(context)
+        listing = ", ".join(f"{k} {v}" for k, v in times.items())
+        await update.message.reply_text(f"✅ Meal check-ins now at: {listing}")
         return
 
     if kind == "settings_cal_custom":
@@ -1217,7 +1158,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             if pending:
                 meals_svc.log_meal(db, user, day, pending.ref, "logged",
-                                   note=caption or None, photo_file_id=photo.file_id)
+                                   note=caption or None,
+                                   photo_file_id=photo.file_id if STORE_PHOTO_FILE_ID else None)
                 mark_nudge_responded(db, user, day, "meal", pending.ref)
                 await update.message.reply_text(f"📷 Logged for {pending.ref}.")
                 return
@@ -1229,7 +1171,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if unlogged:
                 meal = unlogged[0]
                 meals_svc.log_meal(db, user, day, meal, "logged",
-                                   note=caption or None, photo_file_id=photo.file_id)
+                                   note=caption or None,
+                                   photo_file_id=photo.file_id if STORE_PHOTO_FILE_ID else None)
                 await update.message.reply_text(f"📷 Logged as {meal}.")
                 return
 
@@ -1287,12 +1230,11 @@ BOT_COMMANDS = [
     BotCommand("today", "Everything for today"),
     BotCommand("tasks", "Active tasks, tap to finish"),
     BotCommand("breakdown", "Split a task into small steps"),
-    BotCommand("inbox", "Action items waiting from Pocket"),
-    BotCommand("pocketsync", "Pull action items from Pocket now"),
     BotCommand("people", "People to stay in touch with"),
     BotCommand("meals", "Meal check-ins"),
     BotCommand("streak", "How you're doing"),
     BotCommand("settings", "Times, timezone, toggles"),
+    BotCommand("test", "Fire a prompt now to check it works"),
     BotCommand("cancel", "Get unstuck"),
     BotCommand("help", "How this works"),
 ]
@@ -1303,16 +1245,6 @@ async def _post_init(application: Application) -> None:
     # Populates Telegram's Menu button, so commands are discoverable instead of
     # something you have to remember.
     await application.bot.set_my_commands(BOT_COMMANDS)
-
-    if POCKET_WEBHOOK_SECRET:
-        from .webhook import start_webhook_server
-        application.bot_data["webhook_runner"] = await start_webhook_server(application)
-
-
-async def _post_shutdown(application: Application) -> None:
-    runner = application.bot_data.get("webhook_runner")
-    if runner is not None:
-        await runner.cleanup()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1366,7 +1298,6 @@ def main() -> None:
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
         .build()
     )
 
@@ -1376,9 +1307,7 @@ def main() -> None:
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("breakdown", breakdown_cmd))
-    app.add_handler(CommandHandler("inbox", inbox_cmd))
-    app.add_handler(CommandHandler("pocketsync", pocketsync_cmd))
-    app.add_handler(CommandHandler("pocketdebug", pocketdebug_cmd))
+    app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("meals", meals_cmd))
     app.add_handler(CommandHandler("streak", streak_cmd))

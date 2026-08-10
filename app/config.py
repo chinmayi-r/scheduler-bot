@@ -12,6 +12,8 @@ DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "America/New_York")
 # Todoist is the single source of truth for tasks (real app, real GUI —
 # the bot only orchestrates nudges/capture against it, it doesn't own a task table).
 TODOIST_API_TOKEN = os.environ.get("TODOIST_API_TOKEN", "")
+# Where captured tasks land. Leave unset to use your Todoist Inbox.
+TODOIST_PROJECT_ID = os.environ.get("TODOIST_PROJECT_ID", "").strip()
 
 # Optional bootstrap calendar sources for the first user during onboarding.
 # Per-user calendar URLs are stored in the DB after that (no redeploy needed to change them).
@@ -29,15 +31,15 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENROUTER_AP
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
-# Pocket (heypocket.com) action-item sync. When the webhook secret is set, the
-# bot serves an HTTP endpoint so Pocket can push extracted action items in.
-POCKET_API_KEY = os.environ.get("POCKET_API_KEY", "")
-POCKET_WEBHOOK_SECRET = os.environ.get("POCKET_WEBHOOK_SECRET", "")
-POCKET_AUTO_CREATE = os.environ.get("POCKET_AUTO_CREATE", "0") == "1"
-POCKET_POLL_SECONDS = int(os.environ.get("POCKET_POLL_SECONDS", "900"))
-PORT = int(os.environ.get("PORT", "8080"))
 
 BOT_INSTANCE_LOCK = os.environ.get("BOT_INSTANCE_LOCK", "1")
+
+# Keep the file_id of meal photos (lets them be re-shown later). 0 = don't store.
+STORE_PHOTO_FILE_ID = os.environ.get("STORE_PHOTO_FILE_ID", "1") == "1"
+
+# How many missed days in a row before the streak resets. 1 = strict (any miss
+# breaks it), 2 = "never miss twice" (a single slip is forgiven), 3 = looser.
+STREAK_BREAK_AFTER_MISSES = int(os.environ.get("STREAK_BREAK_AFTER_MISSES", "2"))
 
 # How many times to re-ping an unanswered prompt before giving up, and how far apart.
 ESCALATION_MAX = int(os.environ.get("ESCALATION_MAX", "3"))

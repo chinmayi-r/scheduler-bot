@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta, date
 
+from ..config import STREAK_BREAK_AFTER_MISSES
 from ..db import DailyLog, User
 
 
@@ -40,10 +41,12 @@ def is_engaged(db, user: User, day: date) -> bool:
 
 def current_streak(db, user: User, today: date, lookback_days: int = 365) -> int:
     """
-    'Never miss twice': a single missed day is forgiven and doesn't zero the
-    streak, but two misses in a row ends it. Counts consecutive completed days
-    ending yesterday (today is still in progress, so it isn't judged yet).
+    Counts consecutive engaged days ending yesterday (today is still in
+    progress, so it isn't judged yet). STREAK_BREAK_AFTER_MISSES controls how
+    forgiving this is -- at the default of 2 it's "never miss twice": one slip
+    doesn't zero the streak, two in a row does.
     """
+    tolerance = max(1, STREAK_BREAK_AFTER_MISSES)
     cur = 0
     miss_run = 0
     d = today - timedelta(days=1)
@@ -53,7 +56,7 @@ def current_streak(db, user: User, today: date, lookback_days: int = 365) -> int
             miss_run = 0
         else:
             miss_run += 1
-            if miss_run >= 2:
+            if miss_run >= tolerance:
                 break
         d -= timedelta(days=1)
     return cur
@@ -85,4 +88,7 @@ def format_streak_line(db, user: User, today: date) -> str:
     engaged_30 = engaged_last_n_days(db, user, today, 30)
     if streak == 0:
         return f"🔥 Day 0 — let's start today. ({engaged_30}/30 days engaged this month)"
-    return f"🔥 Day {streak} — one miss won't break this, two in a row will reset the count (not you). ({engaged_30}/30 this month)"
+    tol = max(1, STREAK_BREAK_AFTER_MISSES)
+    rule = ("any missed day resets it" if tol == 1
+            else f"{tol} missed days in a row resets the count (not you)")
+    return f"🔥 Day {streak} — {rule}. ({engaged_30}/30 this month)"
