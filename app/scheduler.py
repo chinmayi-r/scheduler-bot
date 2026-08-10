@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, time as dtime
 import pytz
 from telegram.ext import ContextTypes
 
-from .config import ESCALATION_MAX, ESCALATION_MINUTES
-from .db import SessionLocal, User, DailyLog, PendingNudge
+from .config import ESCALATION_MAX, ESCALATION_MINUTES, POCKET_POLL_SECONDS
+from .db import SessionLocal, User, DailyLog, PendingNudge, InboxSuggestion
 from .services.timeutil import today_in_tz, parse_hhmm
 from .services.meals import load_meal_times
 from .services.streaks import get_or_create_log, format_streak_line, days_since_last_engagement
@@ -70,6 +70,13 @@ def schedule_all_active_users(app) -> None:
             schedule_user_jobs(app, u)
     finally:
         db.close()
+
+    from .services.pocket import pocket_api_enabled
+    if pocket_api_enabled() and not any(j.name == "pocket_poll" for j in app.job_queue.jobs()):
+        app.job_queue.run_repeating(
+            _job_pocket_poll, interval=POCKET_POLL_SECONDS, first=30, name="pocket_poll"
+        )
+        print(f"Pocket polling every {POCKET_POLL_SECONDS}s")
 
 
 # ── Escalation (re-ping if ignored) ──────────────────────────────────────────
@@ -327,6 +334,47 @@ async def _job_evening(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id=int(user.telegram_chat_id), text=text, reply_markup=kb)
 
         _schedule_escalation(context.application, user.id, "evening", "", day.isoformat())
+    finally:
+        db.close()
+
+
+async def _job_pocket_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pulls new Pocket action items on a timer. This is what makes the Pocket
+    link work without a public webhook endpoint or a documented payload format."""
+    from .services import pocket as pocket_svc
+    from .services import pocket_sync
+    from . import keyboards as kb
+
+    if not pocket_svc.pocket_api_enabled():
+        return
+
+    db = SessionLocal()
+    try:
+        for user in db.query(User).filter(User.state == "active").all():
+            try:
+                new, _total = pocket_sync.pull_action_items(db, user)
+            except pocket_svc.PocketError as e:
+                print(f"Pocket poll failed: {e}")
+                continue
+            if not new:
+                continue
+
+            rows = (
+                db.query(InboxSuggestion)
+                .filter(InboxSuggestion.user_id == user.id,
+                        InboxSuggestion.status == "pending")
+                .order_by(InboxSuggestion.created_at.desc())
+                .limit(new)
+                .all()
+            )
+            if not rows:
+                continue
+            listing = "\n".join(f"• {r.text}" for r in rows)
+            await context.bot.send_message(
+                chat_id=int(user.telegram_chat_id),
+                text=f"🎙️ Pocket picked up {len(rows)} action item(s):\n{listing}",
+                reply_markup=kb.suggestions_keyboard(rows),
+            )
     finally:
         db.close()
 

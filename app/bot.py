@@ -31,6 +31,8 @@ from .services import people as people_svc
 from .services import meals as meals_svc
 from .services import voice as voice_svc
 from .services import llm as llm_svc
+from .services import pocket as pocket_svc
+from .services import pocket_sync
 from .services.streaks import get_or_create_log, format_streak_line
 from .scheduler import schedule_user_jobs, schedule_all_active_users, mark_nudge_responded
 
@@ -410,11 +412,65 @@ settings_cmd = _simple_command(_settings_view)
 inbox_cmd = _simple_command(_inbox_view)
 
 
+async def pocketsync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_awaiting(context)
+    chat_id = str(update.effective_chat.id)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_chat_id == chat_id).one_or_none()
+        if not user or user.state != "active":
+            await update.message.reply_text("Send /start first.")
+            return
+        if not pocket_svc.pocket_api_enabled():
+            await update.message.reply_text(
+                "Pocket isn't connected. Set POCKET_API_KEY on Railway "
+                "(Pocket → Settings → Developer → API Keys, starts with pk_)."
+            )
+            return
+
+        await update.message.reply_text("Checking Pocket…")
+        try:
+            new, total = pocket_sync.pull_action_items(db, user)
+        except pocket_svc.PocketError as e:
+            await update.message.reply_text(f"Couldn't reach Pocket: {e}")
+            return
+
+        if not total:
+            await update.message.reply_text("No open action items in Pocket right now.")
+            return
+        if not new:
+            await update.message.reply_text(
+                f"Found {total} open action item(s) — all already seen. Check /inbox."
+            )
+            return
+        text, markup = _inbox_view(db, user)
+        await update.message.reply_text(f"Pulled {new} new from Pocket.\n\n{text}", reply_markup=markup)
+    finally:
+        db.close()
+
+
 async def pocketdebug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows what Pocket actually sent. Without this, 'Pocket sent nothing' and
     'Pocket sent a shape I don't parse' are indistinguishable."""
     _clear_awaiting(context)
     from .db import WebhookLog
+
+    lines = []
+    if pocket_svc.pocket_api_enabled():
+        try:
+            info = pocket_svc.account_info()
+            who = info.get("email") or info.get("displayName") or "connected"
+            plan = info.get("plan") or info.get("tier") or "?"
+            lines.append(f"🔑 API key works — {who} (plan: {plan})")
+        except pocket_svc.PocketError as e:
+            lines.append(f"🔑 API key problem: {e}")
+    else:
+        lines.append("🔑 POCKET_API_KEY not set — /pocketsync is unavailable.")
+
+    lines.append(
+        "🪝 Webhook listener: on" if POCKET_WEBHOOK_SECRET
+        else "🪝 Webhook listener: off (POCKET_WEBHOOK_SECRET not set) — pull via /pocketsync still works."
+    )
 
     db = SessionLocal()
     try:
@@ -425,14 +481,14 @@ async def pocketdebug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             .all()
         )
         if not rows:
-            await update.message.reply_text(
-                "No webhook deliveries received yet.\n\n"
-                "If you've already set it up in Pocket, check:\n"
-                "• POCKET_WEBHOOK_SECRET is set on Railway (the listener only starts if it is)\n"
-                "• the Pocket webhook URL ends in /webhooks/pocket\n"
-                "• your Railway service has a public domain generated"
+            lines.append(
+                "\nNo webhook deliveries received yet. If you set one up in Pocket, check "
+                "the URL ends in /webhooks/pocket and your Railway service has a public domain."
             )
+            await update.message.reply_text("\n".join(lines))
             return
+        lines.append("")
+        await update.message.reply_text("\n".join(lines))
 
         parts = []
         for row in rows:
@@ -786,7 +842,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             completed.add(task_id)
             log.completed_task_ids_json = json.dumps(list(completed))
             db.commit()
-            await query.answer("✅ Done")
+
+            # If this task came from Pocket, close it there too rather than
+            # leaving a stale open action item behind.
+            closed = pocket_sync.complete_linked_action_item(db, user, task_id)
+            await query.answer("✅ Done — also closed in Pocket" if closed else "✅ Done")
             markup = query.message.reply_markup
             if markup:
                 rows = [
@@ -882,11 +942,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             if action == "add":
                 try:
-                    quick_capture(db, user, row.text)
+                    task = quick_capture(db, user, row.text)
                 except TodoistError as e:
                     await query.answer(f"Todoist error: {e}", show_alert=True)
                     return
                 row.status = "added"
+                row.todoist_task_id = task.id
                 await query.answer("Added")
             else:
                 row.status = "dismissed"
@@ -905,10 +966,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for row in rows:
                 if action == "add":
                     try:
-                        quick_capture(db, user, row.text)
+                        task = quick_capture(db, user, row.text)
                     except TodoistError:
                         break
                     row.status = "added"
+                    row.todoist_task_id = task.id
                 else:
                     row.status = "dismissed"
                 count += 1
@@ -1226,6 +1288,7 @@ BOT_COMMANDS = [
     BotCommand("tasks", "Active tasks, tap to finish"),
     BotCommand("breakdown", "Split a task into small steps"),
     BotCommand("inbox", "Action items waiting from Pocket"),
+    BotCommand("pocketsync", "Pull action items from Pocket now"),
     BotCommand("people", "People to stay in touch with"),
     BotCommand("meals", "Meal check-ins"),
     BotCommand("streak", "How you're doing"),
@@ -1314,6 +1377,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("breakdown", breakdown_cmd))
     app.add_handler(CommandHandler("inbox", inbox_cmd))
+    app.add_handler(CommandHandler("pocketsync", pocketsync_cmd))
     app.add_handler(CommandHandler("pocketdebug", pocketdebug_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("meals", meals_cmd))

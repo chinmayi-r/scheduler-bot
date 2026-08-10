@@ -136,6 +136,10 @@ class InboxSuggestion(Base):
     external_ref = Column(String, nullable=True)  # recording/action-item id, for dedupe
     status = Column(String, nullable=False, default="pending")  # pending|added|dismissed
 
+    # Links the created Todoist task back to Pocket, so finishing it here can
+    # close the action item over there instead of leaving it open forever.
+    todoist_task_id = Column(String, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

@@ -34,6 +34,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
 POCKET_API_KEY = os.environ.get("POCKET_API_KEY", "")
 POCKET_WEBHOOK_SECRET = os.environ.get("POCKET_WEBHOOK_SECRET", "")
 POCKET_AUTO_CREATE = os.environ.get("POCKET_AUTO_CREATE", "0") == "1"
+POCKET_POLL_SECONDS = int(os.environ.get("POCKET_POLL_SECONDS", "900"))
 PORT = int(os.environ.get("PORT", "8080"))
 
 BOT_INSTANCE_LOCK = os.environ.get("BOT_INSTANCE_LOCK", "1")

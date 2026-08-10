@@ -42,6 +42,7 @@ button, so nothing has to be memorised.
 - `/tasks` — active tasks; tap ✅ to finish, 🔨 to break one down
 - `/breakdown` — split a task that feels too big into steps, first one under 2 min
 - `/inbox` — action items waiting from Pocket
+- `/pocketsync` — pull from Pocket now; `/pocketdebug` — check the connection
 - `/people` — people you're tracking; ✅ contacted, 💤 snooze, 📝 add a note
 - `/meals` — today's meal check-ins
 - `/streak` — how you're doing
@@ -60,12 +61,23 @@ whose first step takes under two minutes — the point is defeating task-initiat
 paralysis, not planning. Works against any OpenAI-compatible endpoint and
 defaults to OpenRouter's free tier; it's one call per button press.
 
-**Pocket** (`POCKET_WEBHOOK_SECRET`) syncs action items from your
-[Pocket recorder](https://heypocket.com). Point a Pocket webhook at
-`https://<your-railway-domain>/webhooks/pocket` and the action items it extracts
-from your conversations arrive for one-tap adding — so tasks get written down
-without you writing them down. Deliveries are signature-verified and
-de-duplicated. Set `POCKET_AUTO_CREATE=1` to skip the approval step.
+**Pocket** (`POCKET_API_KEY`) syncs action items from your
+[Pocket recorder](https://heypocket.com), so tasks get written down without you
+writing them down.
+
+Set the API key and that's it — the bot polls Pocket's MCP server
+(`search_pocket_actionitems`) for open action items and offers them for one-tap
+adding, de-duplicated on Pocket's own item ids. Finishing one here calls
+`update_pocket_actionitem` to mark it `COMPLETED` in Pocket too, so the two
+sides don't drift. Both tools are available on Pocket's free plan. Use
+`/pocketsync` to pull immediately and `/pocketdebug` to verify the connection.
+
+Webhooks are supported as an optional extra for near-instant delivery: set
+`POCKET_WEBHOOK_SECRET` and point a Pocket webhook at
+`https://<your-railway-domain>/webhooks/pocket`. Deliveries are
+signature-verified, de-duplicated, and recorded verbatim for `/pocketdebug`,
+because the webhook payload format isn't publicly documented. Polling needs no
+public URL, so it's the more reliable default.
 
 ## Setup
 
