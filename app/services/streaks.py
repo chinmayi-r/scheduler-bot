@@ -59,6 +59,17 @@ def current_streak(db, user: User, today: date, lookback_days: int = 365) -> int
     return cur
 
 
+def days_since_last_engagement(db, user: User, today: date, lookback_days: int = 60) -> int | None:
+    """How long you've been away. None means no engagement in the whole window,
+    which reads as 'never/long gone' rather than 'yesterday'."""
+    d = today - timedelta(days=1)
+    for gap in range(1, lookback_days + 1):
+        if is_engaged(db, user, d):
+            return gap
+        d -= timedelta(days=1)
+    return None
+
+
 def engaged_last_n_days(db, user: User, today: date, n: int = 30) -> int:
     count = 0
     d = today - timedelta(days=1)

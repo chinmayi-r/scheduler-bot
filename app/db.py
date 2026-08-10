@@ -139,6 +139,25 @@ class InboxSuggestion(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class WebhookLog(Base):
+    """
+    Raw record of the last few inbound webhook deliveries. Pocket's payload
+    format isn't publicly documented, so without this a shape mismatch would
+    look identical to "Pocket never sent anything" -- and you'd have no way to
+    tell which. /pocketdebug reads this.
+    """
+    __tablename__ = "webhook_log"
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String, nullable=False, default="pocket")
+    received_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    ok = Column(Boolean, nullable=False, default=True)
+    note = Column(String, nullable=False, default="")
+    items_found = Column(Integer, nullable=False, default=0)
+    raw = Column(Text, nullable=False, default="")
+
+
 class MealLog(Base):
     __tablename__ = "meal_log"
 

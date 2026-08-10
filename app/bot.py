@@ -410,6 +410,43 @@ settings_cmd = _simple_command(_settings_view)
 inbox_cmd = _simple_command(_inbox_view)
 
 
+async def pocketdebug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows what Pocket actually sent. Without this, 'Pocket sent nothing' and
+    'Pocket sent a shape I don't parse' are indistinguishable."""
+    _clear_awaiting(context)
+    from .db import WebhookLog
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(WebhookLog)
+            .order_by(WebhookLog.received_at.desc())
+            .limit(3)
+            .all()
+        )
+        if not rows:
+            await update.message.reply_text(
+                "No webhook deliveries received yet.\n\n"
+                "If you've already set it up in Pocket, check:\n"
+                "• POCKET_WEBHOOK_SECRET is set on Railway (the listener only starts if it is)\n"
+                "• the Pocket webhook URL ends in /webhooks/pocket\n"
+                "• your Railway service has a public domain generated"
+            )
+            return
+
+        parts = []
+        for row in rows:
+            stamp = row.received_at.strftime("%b %d %H:%M UTC")
+            status = "✅" if row.ok else "❌"
+            body = row.raw if len(row.raw) <= 700 else row.raw[:700] + "…(truncated)"
+            parts.append(
+                f"{status} {stamp}\n{row.note}\nitems found: {row.items_found}\n\n{body}"
+            )
+        await update.message.reply_text("\n\n———\n\n".join(parts))
+    finally:
+        db.close()
+
+
 async def breakdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _clear_awaiting(context)
     chat_id = str(update.effective_chat.id)
@@ -1277,6 +1314,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("breakdown", breakdown_cmd))
     app.add_handler(CommandHandler("inbox", inbox_cmd))
+    app.add_handler(CommandHandler("pocketdebug", pocketdebug_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("meals", meals_cmd))
     app.add_handler(CommandHandler("streak", streak_cmd))

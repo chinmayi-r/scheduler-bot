@@ -10,7 +10,7 @@ from .config import ESCALATION_MAX, ESCALATION_MINUTES
 from .db import SessionLocal, User, DailyLog, PendingNudge
 from .services.timeutil import today_in_tz, parse_hhmm
 from .services.meals import load_meal_times
-from .services.streaks import get_or_create_log, format_streak_line
+from .services.streaks import get_or_create_log, format_streak_line, days_since_last_engagement
 from .services.people import people_due_today, format_person_line
 from .services.todoist import list_active_tasks, TodoistError
 from .services.gcal import fetch_events_for_day_multi_ics
@@ -126,8 +126,19 @@ async def _job_escalate(context: ContextTypes.DEFAULT_TYPE) -> None:
         if row.escalation_count >= ESCALATION_MAX:
             return
 
+        # Midday nags about outstanding work, so re-check the work rather than
+        # trusting a flag: finishing tasks anywhere (here, or in Todoist itself)
+        # should silence it.
+        if kind == "midday":
+            log = get_or_create_log(db, user, day)
+            planned = json.loads(log.planned_task_ids_json or "[]")
+            completed = set(json.loads(log.completed_task_ids_json or "[]"))
+            if not [t for t in planned if t not in completed]:
+                return
+
         labels = {
             "morning": "Still haven't picked today's plan — even one small thing counts.",
+            "midday": "Those tasks are still sitting there. Pick the smallest one.",
             "evening": "Still waiting on your wind-down check-in — takes 10 seconds.",
             "meal": f"Still haven't logged {ref} — even 'skip' is fine, just tap it.",
         }
@@ -199,8 +210,21 @@ async def _job_morning(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         streak_line = format_streak_line(db, user, day)
 
+        # Going quiet for days is the actual failure mode this app exists to
+        # catch, so a long absence changes the opening rather than cheerfully
+        # carrying on as if nothing happened.
+        gap = days_since_last_engagement(db, user, day)
+        if gap is None or gap >= 3:
+            away = "a while" if gap is None else f"{gap} days"
+            opener = (
+                f"Been {away} since you last checked in — no guilt, the tasks just "
+                f"kept existing quietly.\n\nPick one small thing and we're back."
+            )
+        else:
+            opener = f"Morning. {streak_line}"
+
         text = (
-            f"Morning. {streak_line}\n\n"
+            f"{opener}\n\n"
             f"What's the plan for today? Tap 1-5 things below, then Confirm — "
             f"or Skip if today's not a planning day.{todoist_note}{people_txt}"
         )
@@ -260,6 +284,13 @@ async def _job_midday(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=int(user.telegram_chat_id), text=text,
             reply_markup=keyboards.tasks_list_keyboard(remaining_tasks) if remaining_tasks else None,
         )
+
+        # Midday is the resurfacing prompt -- the one that exists specifically to
+        # stop tasks going out of sight. Firing it once and giving up defeats it,
+        # so it escalates like the others when work is still outstanding.
+        if remaining_tasks:
+            _get_or_make_nudge(db, user, day, "midday")
+            _schedule_escalation(context.application, user.id, "midday", "", day.isoformat())
     finally:
         db.close()
 

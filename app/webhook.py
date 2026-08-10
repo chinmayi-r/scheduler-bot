@@ -11,15 +11,49 @@ import json
 from aiohttp import web
 
 from .config import POCKET_WEBHOOK_SECRET, POCKET_AUTO_CREATE, PORT
-from .db import SessionLocal, User, InboxSuggestion
+from .db import SessionLocal, User, InboxSuggestion, WebhookLog
 from .services import pocket as pocket_svc
 from .services.capture import quick_capture
 from .services.todoist import TodoistError
 from . import keyboards
 
+MAX_RAW_CHARS = 4000
+KEEP_LOGS = 20
+
 
 async def _health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
+
+
+def _record_delivery(raw: bytes, *, ok: bool, note: str, items_found: int = 0) -> None:
+    """Keeps a short trail of what actually arrived, so a silent failure can be
+    diagnosed from the chat instead of guessed at."""
+    db = SessionLocal()
+    try:
+        try:
+            body = raw.decode("utf-8", errors="replace")
+        except Exception:
+            body = "<undecodable>"
+        db.add(WebhookLog(
+            source="pocket", ok=ok, note=note[:200],
+            items_found=items_found, raw=body[:MAX_RAW_CHARS],
+        ))
+        db.commit()
+
+        stale = (
+            db.query(WebhookLog)
+            .order_by(WebhookLog.received_at.desc())
+            .offset(KEEP_LOGS)
+            .all()
+        )
+        for row in stale:
+            db.delete(row)
+        if stale:
+            db.commit()
+    except Exception as e:  # logging must never break delivery
+        print(f"Webhook log write failed: {e}")
+    finally:
+        db.close()
 
 
 def _active_users(db) -> list[User]:
@@ -41,20 +75,26 @@ async def _pocket_webhook(request: web.Request) -> web.Response:
     provided = pocket_svc.find_signature_header(dict(request.headers))
     if not pocket_svc.verify_signature(raw, provided, POCKET_WEBHOOK_SECRET):
         print("Pocket webhook: signature verification FAILED -- rejecting.")
+        _record_delivery(raw, ok=False, note="signature verification failed")
         return web.json_response({"error": "bad signature"}, status=401)
 
     try:
         payload = json.loads(raw.decode("utf-8") or "{}")
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         print(f"Pocket webhook: unparseable body: {e}")
+        _record_delivery(raw, ok=False, note=f"unparseable body: {e}")
         return web.json_response({"error": "bad json"}, status=400)
 
     items = pocket_svc.extract_action_items(payload)
     if not items:
         # Not an error -- plenty of Pocket events carry no action items. Logged
         # with the payload shape so a format mismatch is diagnosable.
-        print(f"Pocket webhook: no action items found ({pocket_svc.describe_payload(payload)})")
+        shape = pocket_svc.describe_payload(payload)
+        print(f"Pocket webhook: no action items found ({shape})")
+        _record_delivery(raw, ok=True, note=f"no action items ({shape})")
         return web.json_response({"ok": True, "action_items": 0})
+
+    _record_delivery(raw, ok=True, note="action items extracted", items_found=len(items))
 
     ref = None
     if isinstance(payload, dict):
